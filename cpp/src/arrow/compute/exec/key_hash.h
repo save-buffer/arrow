@@ -32,76 +32,161 @@ namespace compute {
 // Implementations are based on xxh3 32-bit algorithm description from:
 // https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
 //
-class Hashing {
+class Hashing32 {
  public:
-  static void hash_fixed(int64_t hardware_flags, uint32_t num_keys, uint32_t length_key,
-                         const uint8_t* keys, uint32_t* hashes);
+  static void hash_fixed(int64_t hardware_flags, bool combine_hashes, uint32_t num_keys,
+                         uint64_t length_key, const uint8_t* keys, uint32_t* hashes,
+                         uint32_t* temp_hashes_for_combine);
 
-  static void hash_varlen(int64_t hardware_flags, uint32_t num_rows,
+  static void hash_varlen(int64_t hardware_flags, bool combine_hashes, uint32_t num_rows,
                           const uint32_t* offsets, const uint8_t* concatenated_keys,
-                          uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
-                          uint32_t* hashes);
+                          uint32_t* hashes, uint32_t* temp_hashes_for_combine);
+
+  static void hash_varlen(int64_t hardware_flags, bool combine_hashes, uint32_t num_rows,
+                          const uint64_t* offsets, const uint8_t* concatenated_keys,
+                          uint32_t* hashes, uint32_t* temp_hashes_for_combine);
 
   static void HashMultiColumn(const std::vector<KeyEncoder::KeyColumnArray>& cols,
                               KeyEncoder::KeyEncoderContext* ctx, uint32_t* out_hash);
 
  private:
-  static const uint32_t PRIME32_1 = 0x9E3779B1;  // 0b10011110001101110111100110110001
-  static const uint32_t PRIME32_2 = 0x85EBCA77;  // 0b10000101111010111100101001110111
-  static const uint32_t PRIME32_3 = 0xC2B2AE3D;  // 0b11000010101100101010111000111101
-  static const uint32_t PRIME32_4 = 0x27D4EB2F;  // 0b00100111110101001110101100101111
-  static const uint32_t PRIME32_5 = 0x165667B1;  // 0b00010110010101100110011110110001
+  static const uint32_t PRIME32_1 = 0x9E3779B1;
+  static const uint32_t PRIME32_2 = 0x85EBCA77;
+  static const uint32_t PRIME32_3 = 0xC2B2AE3D;
+  static const uint32_t PRIME32_4 = 0x27D4EB2F;
+  static const uint32_t PRIME32_5 = 0x165667B1;
+  static const uint32_t kCombineConst = 0x9e3779b9UL;
+  static const int64_t kStripeSize = 4 * sizeof(uint32_t);
 
-  static void HashCombine(KeyEncoder::KeyEncoderContext* ctx, uint32_t num_rows,
-                          uint32_t* accumulated_hash, const uint32_t* next_column_hash);
+  static inline uint32_t avalanche(uint32_t acc) {
+    acc ^= (acc >> 15);
+    acc *= PRIME32_2;
+    acc ^= (acc >> 13);
+    acc *= PRIME32_3;
+    acc ^= (acc >> 16);
+    return acc;
+  }
+  static inline uint32_t round(uint32_t acc, uint32_t input);
+  static inline uint32_t combine_accumulators(uint32_t acc1, uint32_t acc2, uint32_t acc3,
+                                              uint32_t acc4);
+  static inline uint32_t combine_hashes(uint32_t previous_hash, uint32_t hash) {
+    uint32_t next_hash = previous_hash ^ (hash + kCombineConst + (previous_hash << 6) +
+                                          (previous_hash >> 2));
+    return next_hash;
+  }
+  static inline void process_full_stripes(uint64_t num_stripes, const uint8_t* key,
+                                          uint32_t* out_acc1, uint32_t* out_acc2,
+                                          uint32_t* out_acc3, uint32_t* out_acc4);
+  static inline void process_last_stripe(uint32_t mask1, uint32_t mask2, uint32_t mask3,
+                                         uint32_t mask4, const uint8_t* last_stripe,
+                                         uint32_t* acc1, uint32_t* acc2, uint32_t* acc3,
+                                         uint32_t* acc4);
+  static inline void stripe_mask(int i, uint32_t* mask1, uint32_t* mask2, uint32_t* mask3,
+                                 uint32_t* mask4);
+  template <bool combine_hashes>
+  static void hash_fixedlen_imp(uint32_t num_rows, uint64_t length, const uint8_t* keys,
+                                uint32_t* hashes);
+  template <typename T, bool combine_hashes>
+  static void hash_varlen_imp(uint32_t num_rows, const T* offsets,
+                              const uint8_t* concatenated_keys, uint32_t* hashes);
+  template <bool combine_hashes>
+  static void hash_bit_imp(int64_t bit_offset, uint32_t num_keys, const uint8_t* keys,
+                           uint32_t* hashes);
+  static void hash_bit(bool combine_hashes, int64_t bit_offset, uint32_t num_keys,
+                       const uint8_t* keys, uint32_t* hashes);
+  template <bool combine_hashes, typename T>
+  static void hash_int_imp(uint32_t num_keys, const T* keys, uint32_t* hashes);
+  static void hash_int(bool combine_hashes, uint32_t num_keys, uint64_t length_key,
+                       const uint8_t* keys, uint32_t* hashes);
 
 #if defined(ARROW_HAVE_AVX2)
-  static uint32_t HashCombine_avx2(uint32_t num_rows, uint32_t* accumulated_hash,
-                                   const uint32_t* next_column_hash);
-#endif
-
-  // Avalanche
-  static inline uint32_t avalanche_helper(uint32_t acc);
-#if defined(ARROW_HAVE_AVX2)
-  static void avalanche_avx2(uint32_t num_keys, uint32_t* hashes);
-#endif
-  static void avalanche(int64_t hardware_flags, uint32_t num_keys, uint32_t* hashes);
-
-  // Accumulator combine
-  static inline uint32_t combine_accumulators(const uint32_t acc1, const uint32_t acc2,
-                                              const uint32_t acc3, const uint32_t acc4);
-#if defined(ARROW_HAVE_AVX2)
+  static inline __m256i avalanche_avx2(__m256i hash);
+  static inline __m256i combine_hashes_avx2(__m256i previous_hash, __m256i hash);
+  template <bool combine_hashes>
+  static void avalanche_all_avx2(uint32_t num_rows, uint32_t* hashes,
+                                 const uint32_t* hashes_temp_for_combine);
+  static inline __m256i round_avx2(__m256i acc, __m256i input);
   static inline uint64_t combine_accumulators_avx2(__m256i acc);
+  static inline __m256i stripe_mask_avx2(int i, int j);
+  template <bool two_equal_lengths>
+  static inline __m256i process_stripes_avx2(int64_t num_stripes_A, int64_t num_stripes_B,
+                                             __m256i mask_last_stripe,
+                                             const uint8_t* keys, int64_t offset_A,
+                                             int64_t offset_B);
+  template <bool combine_hashes>
+  static uint32_t hash_fixedlen_imp_avx2(uint32_t num_rows, uint64_t length,
+                                         const uint8_t* keys, uint32_t* hashes,
+                                         uint32_t* hashes_temp_for_combine);
+  static uint32_t hash_fixedlen_avx2(bool combine_hashes, uint32_t num_rows,
+                                     uint64_t length, const uint8_t* keys,
+                                     uint32_t* hashes, uint32_t* hashes_temp_for_combine);
+  template <typename T, bool combine_hashes>
+  static uint32_t hash_varlen_imp_avx2(uint32_t num_rows, const T* offsets,
+                                       const uint8_t* concatenated_keys, uint32_t* hashes,
+                                       uint32_t* hashes_temp_for_combine);
+  static uint32_t hash_varlen_avx2(bool combine_hashes, uint32_t num_rows,
+                                   const uint32_t* offsets,
+                                   const uint8_t* concatenated_keys, uint32_t* hashes,
+                                   uint32_t* hashes_temp_for_combine);
+  static uint32_t hash_varlen_avx2(bool combine_hashes, uint32_t num_rows,
+                                   const uint64_t* offsets,
+                                   const uint8_t* concatenated_keys, uint32_t* hashes,
+                                   uint32_t* hashes_temp_for_combine);
 #endif
+};
 
-  // Helpers
-  template <typename T>
-  static inline void helper_8B(uint32_t key_length, uint32_t num_keys, const T* keys,
-                               uint32_t* hashes);
-  static inline void helper_stripe(uint32_t offset, uint64_t mask_hi, const uint8_t* keys,
-                                   uint32_t& acc1, uint32_t& acc2, uint32_t& acc3,
-                                   uint32_t& acc4);
-  static inline uint32_t helper_tail(uint32_t offset, uint64_t mask, const uint8_t* keys,
-                                     uint32_t acc);
-  static inline uint32_t helper_tail(uint32_t offset, uint64_t mask, const uint8_t* keys,
-                                     uint32_t acc, uint32_t key_length);
-#if defined(ARROW_HAVE_AVX2)
-  static void helper_stripes_avx2(uint32_t num_keys, uint32_t key_length,
-                                  const uint8_t* keys, uint32_t* hash);
-  static void helper_tails_avx2(uint32_t num_keys, uint32_t key_length,
-                                const uint8_t* keys, uint32_t* hash);
-#endif
-  static void helper_stripes(int64_t hardware_flags, uint32_t num_keys,
-                             uint32_t key_length, const uint8_t* keys, uint32_t* hash);
-  static void helper_tails(int64_t hardware_flags, uint32_t num_keys, uint32_t key_length,
-                           const uint8_t* keys, uint32_t* hash);
+class Hashing64 {
+ public:
+  static void hash_fixed(bool combine_hashes, uint32_t num_keys, uint64_t length_key,
+                         const uint8_t* keys, uint64_t* hashes);
 
-#if defined(ARROW_HAVE_AVX2)
-  static void hash_varlen_avx2(uint32_t num_rows, const uint32_t* offsets,
-                               const uint8_t* concatenated_keys,
-                               uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
-                               uint32_t* hashes);
-#endif
+  static void hash_varlen(bool combine_hashes, uint32_t num_rows, const uint32_t* offsets,
+                          const uint8_t* concatenated_keys, uint64_t* hashes);
+
+  static void hash_varlen(bool combine_hashes, uint32_t num_rows, const uint64_t* offsets,
+                          const uint8_t* concatenated_keys, uint64_t* hashes);
+
+  static void HashMultiColumn(const std::vector<KeyEncoder::KeyColumnArray>& cols,
+                              KeyEncoder::KeyEncoderContext* ctx, uint64_t* hashes);
+
+ private:
+  static const uint64_t PRIME64_1 = 0x9E3779B185EBCA87ULL;
+  static const uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4FULL;
+  static const uint64_t PRIME64_3 = 0x165667B19E3779F9ULL;
+  static const uint64_t PRIME64_4 = 0x85EBCA77C2B2AE63ULL;
+  static const uint64_t PRIME64_5 = 0x27D4EB2F165667C5ULL;
+  static const uint32_t kCombineConst = 0x9e3779b9UL;
+  static const int64_t kStripeSize = 4 * sizeof(uint64_t);
+
+  static inline uint64_t avalanche(uint64_t acc);
+  static inline uint64_t round(uint64_t acc, uint64_t input);
+  static inline uint64_t combine_accumulators(uint64_t acc1, uint64_t acc2, uint64_t acc3,
+                                              uint64_t acc4);
+  static inline void combine_hashes(uint64_t* multi_column_hash, uint64_t hash);
+  static inline void process_full_stripes(uint64_t num_stripes, const uint8_t* key,
+                                          uint64_t* out_acc1, uint64_t* out_acc2,
+                                          uint64_t* out_acc3, uint64_t* out_acc4);
+  static inline void process_last_stripe(uint64_t mask1, uint64_t mask2, uint64_t mask3,
+                                         uint64_t mask4, const uint8_t* last_stripe,
+                                         uint64_t* acc1, uint64_t* acc2, uint64_t* acc3,
+                                         uint64_t* acc4);
+  static inline void stripe_mask(int i, uint64_t* mask1, uint64_t* mask2, uint64_t* mask3,
+                                 uint64_t* mask4);
+  template <bool combine_hashes>
+  static void hash_fixedlen_imp(uint32_t num_rows, uint64_t length, const uint8_t* keys,
+                                uint64_t* hashes);
+  template <typename T, bool combine_hashes>
+  static void hash_varlen_imp(uint32_t num_rows, const T* offsets,
+                              const uint8_t* concatenated_keys, uint64_t* hashes);
+  template <bool combine_hashes>
+  static void hash_bit_imp(int64_t bit_offset, uint32_t num_keys, const uint8_t* keys,
+                           uint64_t* hashes);
+  static void hash_bit(bool combine_hashes, int64_t bit_offset, uint32_t num_keys,
+                       const uint8_t* keys, uint64_t* hashes);
+  template <bool combine_hashes, typename T>
+  static void hash_int_imp(uint32_t num_keys, const T* keys, uint64_t* hashes);
+  static void hash_int(bool combine_hashes, uint32_t num_keys, uint64_t length_key,
+                       const uint8_t* keys, uint64_t* hashes);
 };
 
 }  // namespace compute
