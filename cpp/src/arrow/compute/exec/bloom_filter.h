@@ -248,7 +248,7 @@ class BloomFilterBuilder {
   virtual ~BloomFilterBuilder() = default;
   virtual Status Begin(size_t num_threads, int64_t hardware_flags, MemoryPool* pool,
                        int64_t num_rows, int64_t num_batches,
-                       BlockedBloomFilter* build_target) = 0;
+                       BlockedBloomFilter *build_target) = 0;
   virtual int64_t num_tasks() const { return 0; }
   virtual void RunInitTask(int64_t task_id) {}
   virtual Status PushNextBatch(size_t thread_index, int num_rows,
@@ -264,7 +264,7 @@ class BloomFilterBuilder_SingleThreaded : public BloomFilterBuilder {
  public:
   Status Begin(size_t num_threads, int64_t hardware_flags, MemoryPool* pool,
                int64_t num_rows, int64_t num_batches,
-               BlockedBloomFilter* build_target) override;
+               BlockedBloomFilter *build_target) override;
 
   Status PushNextBatch(size_t /*thread_index*/, int num_rows,
                        const uint32_t* hashes) override;
@@ -277,14 +277,14 @@ class BloomFilterBuilder_SingleThreaded : public BloomFilterBuilder {
   void PushNextBatchImp(int num_rows, const T* hashes);
 
   int64_t hardware_flags_;
-  BlockedBloomFilter* build_target_;
+  BlockedBloomFilter *build_target_;
 };
 
 class BloomFilterBuilder_Parallel : public BloomFilterBuilder {
  public:
   Status Begin(size_t num_threads, int64_t hardware_flags, MemoryPool* pool,
                int64_t num_rows, int64_t num_batches,
-               BlockedBloomFilter* build_target) override;
+               BlockedBloomFilter *build_target) override;
 
   Status PushNextBatch(size_t thread_id, int num_rows, const uint32_t* hashes) override;
 
@@ -297,7 +297,7 @@ class BloomFilterBuilder_Parallel : public BloomFilterBuilder {
   void PushNextBatchImp(size_t thread_id, int num_rows, const T* hashes);
 
   int64_t hardware_flags_;
-  BlockedBloomFilter* build_target_;
+  BlockedBloomFilter *build_target_;
   int log_num_prtns_;
   struct ThreadLocalState {
     std::vector<uint32_t> partitioned_hashes_32;

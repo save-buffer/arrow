@@ -184,6 +184,13 @@ class ARROW_EXPORT ExecNode {
   // - A method allows passing a ProductionHint asynchronously from an output node
   //   (replacing PauseProducing(), ResumeProducing(), StopProducing())
 
+  /// \brief Steps performed immediately before StartProducing is called
+  ///
+  /// This hook performs any actions in between creation of ExecPlan and the call to
+  /// StartProducing. An example could be Bloom filter pushdown. The order of ExecNodes
+  /// that executes this method is undefined, but the calls are made synchronously.
+  virtual Status PrepareToProduce() { return Status::OK(); }
+
   /// \brief Start producing
   ///
   /// This must only be called once.  If this fails, then other lifecycle

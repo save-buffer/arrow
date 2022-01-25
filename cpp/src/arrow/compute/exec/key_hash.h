@@ -29,11 +29,48 @@
 namespace arrow {
 namespace compute {
 
+inline void ColumnArraysFromExecBatch(
+  const ExecBatch &batch,
+  int start_row,
+  int num_rows,
+  std::vector<KeyEncoder::KeyColumnArray> &column_arrays)
+{
+    int num_columns = static_cast<int>(batch.values.size());
+    column_arrays.resize(num_columns);
+    for (int i = 0; i < num_columns; ++i)
+    {
+        const Datum &data = batch.values[i];
+        ARROW_DCHECK(data.is_array());
+        const std::shared_ptr<ArrayData> &array_data = data.array();
+        column_arrays[i] =
+            KeyEncoder::ColumnArrayFromArrayData(array_data, start_row, num_rows);
+    }
+}
+
 // Implementations are based on xxh3 32-bit algorithm description from:
 // https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
 //
 class Hashing32 {
  public:
+
+  // Note: length is NOT guarded by key_batch. In other words, (offset + length <= key_batch.length) must be true.
+  static void HashBatch(
+      const ExecBatch &key_batch,
+      uint32_t *hashes,
+      int64_t hardware_flags,
+      util::TempVectorStack *temp_stack,
+      int64_t offset,
+      int64_t length)
+  {
+      std::vector<KeyEncoder::KeyColumnArray> column_arrays;
+      ColumnArraysFromExecBatch(key_batch, offset, length, column_arrays);
+
+      KeyEncoder::KeyEncoderContext ctx;
+      ctx.hardware_flags = hardware_flags;
+      ctx.stack = temp_stack;
+      HashMultiColumn(column_arrays, &ctx, hashes);
+  }
+
   static void hash_fixed(int64_t hardware_flags, bool combine_hashes, uint32_t num_keys,
                          uint64_t length_key, const uint8_t* keys, uint32_t* hashes,
                          uint32_t* temp_hashes_for_combine);
