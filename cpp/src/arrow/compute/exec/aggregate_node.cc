@@ -89,8 +89,7 @@ class ScalarAggregateNode : public ExecNode {
                       std::vector<std::vector<std::unique_ptr<KernelState>>> states,
                       std::vector<std::unique_ptr<FunctionOptions>> owned_options)
       : ExecNode(plan, std::move(inputs), {"target"},
-                 /*output_schema=*/std::move(output_schema),
-                 /*num_outputs=*/1),
+                 /*output_schema=*/std::move(output_schema)),
         target_field_ids_(std::move(target_field_ids)),
         aggs_(std::move(aggs)),
         kernels_(std::move(kernels)),
@@ -209,7 +208,7 @@ class ScalarAggregateNode : public ExecNode {
   void ErrorReceived(ExecNode* input, Status error) override {
     EVENT(span_, "ErrorReceived", {{"error", error.message()}});
     DCHECK_EQ(input, inputs_[0]);
-    outputs_[0]->ErrorReceived(this, std::move(error));
+    output_->ErrorReceived(this, std::move(error));
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -228,21 +227,16 @@ class ScalarAggregateNode : public ExecNode {
     finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     // Scalar aggregates will only output a single batch
-    outputs_[0]->InputFinished(this, 1);
+    output_->InputFinished(this, 1);
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->PauseProducing(this, counter);
+  void PauseProducing(int32_t counter) override {
+    inputs_[0]->PauseProducing(counter);
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    inputs_[0]->ResumeProducing(this, counter);
-  }
-
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
+  void ResumeProducing(int32_t counter) override {
+    inputs_[0]->ResumeProducing(counter);
   }
 
   void StopProducing() override {
@@ -250,7 +244,7 @@ class ScalarAggregateNode : public ExecNode {
     if (input_counter_.Cancel()) {
       finished_.MarkFinished();
     }
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
 
   Future<> finished() override { return finished_; }
@@ -284,7 +278,7 @@ class ScalarAggregateNode : public ExecNode {
       RETURN_NOT_OK(kernels_[i]->finalize(&ctx, &batch.values[i]));
     }
 
-    outputs_[0]->InputReceived(this, std::move(batch));
+    output_->InputReceived(this, std::move(batch));
     finished_.MarkFinished();
     return Status::OK();
   }
@@ -307,8 +301,7 @@ class GroupByNode : public ExecNode {
               std::vector<internal::Aggregate> aggs,
               std::vector<const HashAggregateKernel*> agg_kernels,
               std::vector<std::unique_ptr<FunctionOptions>> owned_options)
-      : ExecNode(input->plan(), {input}, {"groupby"}, std::move(output_schema),
-                 /*num_outputs=*/1),
+      : ExecNode(input->plan(), {input}, {"groupby"}, std::move(output_schema)),
         ctx_(ctx),
         key_field_ids_(std::move(key_field_ids)),
         agg_src_field_ids_(std::move(agg_src_field_ids)),
@@ -522,7 +515,7 @@ class GroupByNode : public ExecNode {
     if (finished_.is_finished()) return;
 
     int64_t batch_size = output_batch_size();
-    outputs_[0]->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
+    output_->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
 
     if (output_counter_.Increment()) {
       finished_.MarkFinished();
@@ -534,7 +527,7 @@ class GroupByNode : public ExecNode {
     ARROW_ASSIGN_OR_RAISE(out_data_, Finalize());
 
     int num_output_batches = *output_counter_.total();
-    outputs_[0]->InputFinished(this, num_output_batches);
+    output_->InputFinished(this, num_output_batches);
 
     auto executor = ctx_->executor();
     for (int i = 0; i < num_output_batches; ++i) {
@@ -577,7 +570,7 @@ class GroupByNode : public ExecNode {
 
     DCHECK_EQ(input, inputs_[0]);
 
-    outputs_[0]->ErrorReceived(this, std::move(error));
+    output_->ErrorReceived(this, std::move(error));
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -605,28 +598,25 @@ class GroupByNode : public ExecNode {
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
+  void PauseProducing(int32_t counter) override {
     // TODO(ARROW-16260)
     // Without spillover there is way to handle backpressure in this node
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
+  void ResumeProducing(int32_t counter) override {
     // TODO(ARROW-16260)
     // Without spillover there is way to handle backpressure in this node
   }
 
-  void StopProducing(ExecNode* output) override {
+  void StopProducing() override {
     EVENT(span_, "StopProducing");
-    DCHECK_EQ(output, outputs_[0]);
 
     ARROW_UNUSED(input_counter_.Cancel());
     if (output_counter_.Cancel()) {
       finished_.MarkFinished();
     }
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
-
-  void StopProducing() override { StopProducing(outputs_[0]); }
 
   Future<> finished() override { return finished_; }
 

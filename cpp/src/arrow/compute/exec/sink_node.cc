@@ -92,8 +92,7 @@ class SinkNode : public ExecNode {
            AsyncGenerator<util::optional<ExecBatch>>* generator,
            BackpressureOptions backpressure,
            BackpressureMonitor** backpressure_monitor_out)
-      : ExecNode(plan, std::move(inputs), {"collected"}, {},
-                 /*num_outputs=*/0),
+      : ExecNode(plan, std::move(inputs), {"collected"}, {}, /*is_sink=*/true),
         backpressure_queue_(backpressure.resume_if_below, backpressure.pause_if_above),
         push_gen_(),
         producer_(push_gen_.producer()),
@@ -146,19 +145,18 @@ class SinkNode : public ExecNode {
   [[noreturn]] static void NoOutputs() {
     Unreachable("no outputs; this should never be called");
   }
-  [[noreturn]] void ResumeProducing(ExecNode* output, int32_t counter) override {
+  [[noreturn]] void ResumeProducing(int32_t counter) override {
     NoOutputs();
   }
-  [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
+  [[noreturn]] void PauseProducing(int32_t counter) override {
     NoOutputs();
   }
-  [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
 
   void StopProducing() override {
     EVENT(span_, "StopProducing");
 
     Finish();
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
 
   Future<> finished() override { return finished_; }
@@ -169,7 +167,7 @@ class SinkNode : public ExecNode {
       auto state_change = backpressure_queue_.RecordProduced(bytes_used);
       if (state_change >= 0) {
         EVENT(span_, "Backpressure applied", {{"backpressure.counter", state_change}});
-        inputs_[0]->PauseProducing(this, state_change);
+        inputs_[0]->PauseProducing(state_change);
       }
     }
   }
@@ -180,7 +178,7 @@ class SinkNode : public ExecNode {
       auto state_change = backpressure_queue_.RecordConsumed(bytes_freed);
       if (state_change >= 0) {
         EVENT(span_, "Backpressure released", {{"backpressure.counter", state_change}});
-        inputs_[0]->ResumeProducing(this, state_change);
+        inputs_[0]->ResumeProducing(state_change);
       }
     }
   }
@@ -212,7 +210,7 @@ class SinkNode : public ExecNode {
     if (input_counter_.Cancel()) {
       Finish();
     }
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -265,7 +263,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   ConsumingSinkNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
                     std::shared_ptr<SinkNodeConsumer> consumer)
       : ExecNode(plan, std::move(inputs), {"to_consume"}, {},
-                 /*num_outputs=*/0),
+                 /*is_sink=*/true),
         consumer_(std::move(consumer)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -295,22 +293,21 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   [[noreturn]] static void NoOutputs() {
     Unreachable("no outputs; this should never be called");
   }
-  [[noreturn]] void ResumeProducing(ExecNode* output, int32_t counter) override {
+  [[noreturn]] void ResumeProducing(int32_t counter) override {
     NoOutputs();
   }
-  [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
+  [[noreturn]] void PauseProducing(int32_t counter) override {
     NoOutputs();
   }
-  [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
 
-  void Pause() override { inputs_[0]->PauseProducing(this, ++backpressure_counter_); }
+  void Pause() override { inputs_[0]->PauseProducing(++backpressure_counter_); }
 
-  void Resume() override { inputs_[0]->ResumeProducing(this, ++backpressure_counter_); }
+  void Resume() override { inputs_[0]->ResumeProducing(++backpressure_counter_); }
 
   void StopProducing() override {
     EVENT(span_, "StopProducing");
     Finish(Status::Invalid("ExecPlan was stopped early"));
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
 
   Future<> finished() override { return finished_; }
@@ -335,7 +332,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
       if (input_counter_.Cancel()) {
         Finish(std::move(consumption_status));
       }
-      inputs_[0]->StopProducing(this);
+      inputs_[0]->StopProducing();
       return;
     }
 
@@ -352,7 +349,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
       Finish(std::move(error));
     }
 
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {

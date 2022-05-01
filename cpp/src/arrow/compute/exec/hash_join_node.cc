@@ -460,8 +460,7 @@ class HashJoinNode : public ExecNode {
                std::unique_ptr<HashJoinSchema> schema_mgr, Expression filter,
                std::unique_ptr<HashJoinImpl> impl)
       : ExecNode(plan, inputs, {"left", "right"},
-                 /*output_schema=*/std::move(output_schema),
-                 /*num_outputs=*/1),
+                 /*output_schema=*/std::move(output_schema)),
         join_type_(join_options.join_type),
         key_cmp_(join_options.key_cmp),
         filter_(std::move(filter)),
@@ -550,7 +549,7 @@ class HashJoinNode : public ExecNode {
     EVENT(span_, "ErrorReceived", {{"error", error.message()}});
     DCHECK_EQ(input, inputs_[0]);
     StopProducing();
-    outputs_[0]->ErrorReceived(this, std::move(error));
+    output_->ErrorReceived(this, std::move(error));
   }
 
   void InputFinished(ExecNode* input, int total_batches) override {
@@ -592,17 +591,12 @@ class HashJoinNode : public ExecNode {
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
+  void PauseProducing(int32_t counter) override {
     // TODO(ARROW-16246)
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
+  void ResumeProducing(int32_t counter) override {
     // TODO(ARROW-16246)
-  }
-
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
   }
 
   void StopProducing() override {
@@ -610,7 +604,7 @@ class HashJoinNode : public ExecNode {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
       for (auto&& input : inputs_) {
-        input->StopProducing(this);
+        input->StopProducing();
       }
       impl_->Abort([this]() { ARROW_UNUSED(task_group_.End()); });
     }
@@ -620,13 +614,13 @@ class HashJoinNode : public ExecNode {
 
  private:
   void OutputBatchCallback(ExecBatch batch) {
-    outputs_[0]->InputReceived(this, std::move(batch));
+      output_->InputReceived(this, std::move(batch));
   }
 
   void FinishedCallback(int64_t total_num_batches) {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
-      outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
+      output_->InputFinished(this, static_cast<int>(total_num_batches));
       ARROW_UNUSED(task_group_.End());
     }
   }

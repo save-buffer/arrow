@@ -168,7 +168,7 @@ Result<Datum> GroupByUsingExecPlan(const BatchesWithSchema& input,
                         start_and_collect.MoveResult());
 
   ArrayVector out_arrays(aggregates.size() + key_names.size());
-  const auto& output_schema = plan->sources()[0]->outputs()[0]->output_schema();
+  const auto& output_schema = plan->sources()[0]->output()->output_schema();
   for (size_t i = 0; i < out_arrays.size(); ++i) {
     std::vector<std::shared_ptr<Array>> arrays(output_batches.size());
     for (size_t j = 0; j < output_batches.size(); ++j) {

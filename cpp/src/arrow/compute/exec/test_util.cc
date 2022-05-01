@@ -58,9 +58,9 @@ namespace compute {
 namespace {
 
 struct DummyNode : ExecNode {
-  DummyNode(ExecPlan* plan, NodeVector inputs, int num_outputs,
-            StartProducingFunc start_producing, StopProducingFunc stop_producing)
-      : ExecNode(plan, std::move(inputs), {}, dummy_schema(), num_outputs),
+  DummyNode(ExecPlan* plan, NodeVector inputs,
+            bool is_sink, StartProducingFunc start_producing, StopProducingFunc stop_producing)
+      : ExecNode(plan, std::move(inputs), {}, dummy_schema(), is_sink),
         start_producing_(std::move(start_producing)),
         stop_producing_(std::move(stop_producing)) {
     input_labels_.resize(inputs_.size());
@@ -85,25 +85,16 @@ struct DummyNode : ExecNode {
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
-    ASSERT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
-    AssertIsOutput(output);
+  void PauseProducing(int32_t counter) override {
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
-    ASSERT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
-    AssertIsOutput(output);
-  }
-
-  void StopProducing(ExecNode* output) override {
-    EXPECT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
-    AssertIsOutput(output);
+  void ResumeProducing(int32_t counter) override {
   }
 
   void StopProducing() override {
     if (started_) {
       for (const auto& input : inputs_) {
-        input->StopProducing(this);
+        input->StopProducing();
       }
       if (stop_producing_) {
         stop_producing_(this);
@@ -114,11 +105,6 @@ struct DummyNode : ExecNode {
   Future<> finished() override { return Future<>::MakeFinished(); }
 
  private:
-  void AssertIsOutput(ExecNode* output) {
-    auto it = std::find(outputs_.begin(), outputs_.end(), output);
-    ASSERT_NE(it, outputs_.end());
-  }
-
   std::shared_ptr<Schema> dummy_schema() const {
     return schema({field("dummy", null())});
   }
@@ -132,10 +118,10 @@ struct DummyNode : ExecNode {
 }  // namespace
 
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
-                        int num_outputs, StartProducingFunc start_producing,
+                        bool is_sink, StartProducingFunc start_producing,
                         StopProducingFunc stop_producing) {
   auto node =
-      plan->EmplaceNode<DummyNode>(plan, std::move(inputs), num_outputs,
+      plan->EmplaceNode<DummyNode>(plan, std::move(inputs), is_sink,
                                    std::move(start_producing), std::move(stop_producing));
   if (!label.empty()) {
     node->SetLabel(std::move(label));

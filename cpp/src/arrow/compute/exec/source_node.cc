@@ -48,8 +48,7 @@ namespace {
 struct SourceNode : ExecNode {
   SourceNode(ExecPlan* plan, std::shared_ptr<Schema> output_schema,
              AsyncGenerator<util::optional<ExecBatch>> generator)
-      : ExecNode(plan, {}, {}, std::move(output_schema),
-                 /*num_outputs=*/1),
+      : ExecNode(plan, {}, {}, std::move(output_schema)),
         generator_(std::move(generator)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -119,16 +118,16 @@ struct SourceNode : ExecNode {
                           auto status = task_group_.AddTask(
                               [this, executor, batch]() -> Result<Future<>> {
                                 return executor->Submit([=]() {
-                                  outputs_[0]->InputReceived(this, std::move(batch));
+                                  output_->InputReceived(this, std::move(batch));
                                   return Status::OK();
                                 });
                               });
                           if (!status.ok()) {
-                            outputs_[0]->ErrorReceived(this, std::move(status));
+                            output_->ErrorReceived(this, std::move(status));
                             return Break(total_batches);
                           }
                         } else {
-                          outputs_[0]->InputReceived(this, std::move(batch));
+                          output_->InputReceived(this, std::move(batch));
                         }
                         lock.lock();
                         if (!backpressure_future_.is_finished()) {
@@ -147,19 +146,19 @@ struct SourceNode : ExecNode {
                         std::unique_lock<std::mutex> lock(mutex_);
                         stop_requested_ = true;
                         lock.unlock();
-                        outputs_[0]->ErrorReceived(this, error);
+                        output_->ErrorReceived(this, error);
                         return Break(total_batches);
                       },
                       options);
                 }).Then([&](int total_batches) {
-      outputs_[0]->InputFinished(this, total_batches);
+      output_->InputFinished(this, total_batches);
       return task_group_.End();
     });
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
+  void PauseProducing(int32_t counter) override {
     std::lock_guard<std::mutex> lg(mutex_);
     if (counter <= backpressure_counter_) {
       return;
@@ -172,7 +171,7 @@ struct SourceNode : ExecNode {
     backpressure_future_ = Future<>::Make();
   }
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
+  void ResumeProducing(int32_t counter) override {
     Future<> to_finish;
     {
       std::lock_guard<std::mutex> lg(mutex_);
@@ -186,11 +185,6 @@ struct SourceNode : ExecNode {
       to_finish = backpressure_future_;
     }
     to_finish.MarkFinished();
-  }
-
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
   }
 
   void StopProducing() override {

@@ -107,7 +107,9 @@ class ARROW_EXPORT ExecNode {
 
   // The number of inputs/outputs expected by this node
   int num_inputs() const { return static_cast<int>(inputs_.size()); }
-  int num_outputs() const { return num_outputs_; }
+
+  // Returns whether this node is a sink node
+  bool is_sink() const { return is_sink_; }
 
   /// This node's predecessors in the exec plan
   const NodeVector& inputs() const { return inputs_; }
@@ -116,7 +118,7 @@ class ARROW_EXPORT ExecNode {
   const std::vector<std::string>& input_labels() const { return input_labels_; }
 
   /// This node's successors in the exec plan
-  const NodeVector& outputs() const { return outputs_; }
+  const ExecNode *output() const { return output_; }
 
   /// The datatypes for batches produced by this node
   const std::shared_ptr<Schema>& output_schema() const { return output_schema_; }
@@ -222,7 +224,6 @@ class ARROW_EXPORT ExecNode {
 
   /// \brief Pause producing temporarily
   ///
-  /// \param output Pointer to the output that is full
   /// \param counter Counter used to sequence calls to pause/resume
   ///
   /// This call is a hint that an output node is currently not willing
@@ -231,25 +232,21 @@ class ARROW_EXPORT ExecNode {
   /// This may be called any number of times after StartProducing() succeeds.
   /// However, the node is still free to produce data (which may be difficult
   /// to prevent anyway if data is produced using multiple threads).
-  virtual void PauseProducing(ExecNode* output, int32_t counter) = 0;
+  virtual void PauseProducing(int32_t counter) = 0;
 
   /// \brief Resume producing after a temporary pause
   ///
-  /// \param output Pointer to the output that is now free
   /// \param counter Counter used to sequence calls to pause/resume
   ///
   /// This call is a hint that an output node is willing to receive data again.
   ///
   /// This may be called any number of times after StartProducing() succeeds.
-  virtual void ResumeProducing(ExecNode* output, int32_t counter) = 0;
+  virtual void ResumeProducing(int32_t counter) = 0;
 
   /// \brief Stop producing definitively to a single output
   ///
   /// This call is a hint that an output node has completed and is not willing
   /// to receive any further data.
-  virtual void StopProducing(ExecNode* output) = 0;
-
-  /// \brief Stop producing definitively to all outputs
   virtual void StopProducing() = 0;
 
   /// \brief A future which will be marked finished when this node has stopped producing.
@@ -259,7 +256,7 @@ class ARROW_EXPORT ExecNode {
 
  protected:
   ExecNode(ExecPlan* plan, NodeVector inputs, std::vector<std::string> input_labels,
-           std::shared_ptr<Schema> output_schema, int num_outputs);
+           std::shared_ptr<Schema> output_schema, bool is_sink = false);
 
   // A helper method to send an error status to all outputs.
   // Returns true if the status was an error.
@@ -275,8 +272,8 @@ class ARROW_EXPORT ExecNode {
   std::vector<std::string> input_labels_;
 
   std::shared_ptr<Schema> output_schema_;
-  int num_outputs_;
-  NodeVector outputs_;
+  bool is_sink_;
+  ExecNode *output_;
 
   // Future to sync finished
   Future<> finished_ = Future<>::MakeFinished();
@@ -303,11 +300,9 @@ class MapNode : public ExecNode {
 
   Status StartProducing() override;
 
-  void PauseProducing(ExecNode* output, int32_t counter) override;
+  void PauseProducing(int32_t counter) override;
 
-  void ResumeProducing(ExecNode* output, int32_t counter) override;
-
-  void StopProducing(ExecNode* output) override;
+  void ResumeProducing(int32_t counter) override;
 
   void StopProducing() override;
 

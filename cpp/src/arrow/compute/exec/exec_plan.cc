@@ -63,7 +63,7 @@ struct ExecPlanImpl : public ExecPlan {
     if (node->num_inputs() == 0) {
       sources_.push_back(node.get());
     }
-    if (node->num_outputs() == 0) {
+    if (node->is_sink()) {
       sinks_.push_back(node.get());
     }
     nodes_.push_back(std::move(node));
@@ -114,7 +114,7 @@ struct ExecPlanImpl : public ExecPlan {
       if (!st.ok()) {
         // Stop nodes that successfully started, in reverse order
         stopped_ = true;
-        StopProducingImpl(it.base(), sorted_nodes_.end());
+        StopProducing();
         break;
       }
 
@@ -130,18 +130,8 @@ struct ExecPlanImpl : public ExecPlan {
     DCHECK(started_) << "stopped an ExecPlan which never started";
     EVENT(span_, "StopProducing");
     stopped_ = true;
-
-    StopProducingImpl(sorted_nodes_.begin(), sorted_nodes_.end());
-  }
-
-  template <typename It>
-  void StopProducingImpl(It begin, It end) {
-    for (auto it = begin; it != end; ++it) {
-      auto node = *it;
-      EVENT(span_, "StopProducing:" + node->label(),
-            {{"node.label", node->label()}, {"node.kind_name", node->kind_name()}});
-      node->StopProducing();
-    }
+    for(ExecNode *e : sinks())
+        e->StopProducing();
   }
 
   NodeVector TopoSort() const {
@@ -253,14 +243,6 @@ const ExecPlanImpl* ToDerived(const ExecPlan* ptr) {
   return checked_cast<const ExecPlanImpl*>(ptr);
 }
 
-util::optional<int> GetNodeIndex(const std::vector<ExecNode*>& nodes,
-                                 const ExecNode* node) {
-  for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
-    if (nodes[i] == node) return i;
-  }
-  return util::nullopt;
-}
-
 }  // namespace
 
 Result<std::shared_ptr<ExecPlan>> ExecPlan::Make(
@@ -296,15 +278,20 @@ std::string ExecPlan::ToString() const { return ToDerived(this)->ToString(); }
 
 ExecNode::ExecNode(ExecPlan* plan, NodeVector inputs,
                    std::vector<std::string> input_labels,
-                   std::shared_ptr<Schema> output_schema, int num_outputs)
+                   std::shared_ptr<Schema> output_schema,
+                   bool is_sink)
     : plan_(plan),
       inputs_(std::move(inputs)),
       input_labels_(std::move(input_labels)),
       output_schema_(std::move(output_schema)),
-      num_outputs_(num_outputs) {
-  for (auto input : inputs_) {
-    input->outputs_.push_back(this);
-  }
+      is_sink_(is_sink),
+      output_(nullptr) {
+    for(auto input : inputs_)
+    {
+        // We allow duplicates of the inputs in the input list
+        ARROW_DCHECK(input->output_ == nullptr || input->output_ == this);
+        input->output_ = this;
+    }
 }
 
 Status ExecNode::Validate() const {
@@ -313,19 +300,18 @@ Status ExecNode::Validate() const {
                            num_inputs(), ", actual ", input_labels_.size(), ")");
   }
 
-  if (static_cast<int>(outputs_.size()) != num_outputs_) {
-    return Status::Invalid("Invalid number of outputs for '", label(), "' (expected ",
-                           num_outputs(), ", actual ", outputs_.size(), ")");
-  }
+  if(!is_sink() && output_ == nullptr)
+      return Status::Invalid("Node '", label(), "' is not listed as a sink node, but doesn't have an output");
+  else if(is_sink() && inputs_.empty())
+      return Status::Invalid("Node '", label(), "' is listed as a sink node, but doesn't have any inputs");
 
-  for (auto out : outputs_) {
-    auto input_index = GetNodeIndex(out->inputs(), this);
-    if (!input_index) {
-      return Status::Invalid("Node '", label(), "' outputs to node '", out->label(),
-                             "' but is not listed as an input.");
-    }
-  }
+  for(auto input : inputs_)
+  {
+      if(input->output_ != this)
+          return Status::Invalid("Node '", input->label(), "' is listed as an input to '", label(),
+                                 "', but '", input->label(), "''s output_ field is not set properly.");
 
+  }
   return Status::OK();
 }
 
@@ -352,18 +338,14 @@ std::string ExecNode::ToStringExtra(int indent = 0) const { return ""; }
 
 bool ExecNode::ErrorIfNotOk(Status status) {
   if (status.ok()) return false;
-
-  for (auto out : outputs_) {
-    out->ErrorReceived(this, out == outputs_.back() ? std::move(status) : status);
-  }
+  output_->ErrorReceived(this, std::move(status));
   return true;
 }
 
 MapNode::MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
                  std::shared_ptr<Schema> output_schema, bool async_mode)
     : ExecNode(plan, std::move(inputs), /*input_labels=*/{"target"},
-               std::move(output_schema),
-               /*num_outputs=*/1) {
+               std::move(output_schema)) {
   if (async_mode) {
     executor_ = plan_->exec_context()->executor();
   } else {
@@ -374,13 +356,13 @@ MapNode::MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
 void MapNode::ErrorReceived(ExecNode* input, Status error) {
   DCHECK_EQ(input, inputs_[0]);
   EVENT(span_, "ErrorReceived", {{"error.message", error.message()}});
-  outputs_[0]->ErrorReceived(this, std::move(error));
+  output_->ErrorReceived(this, std::move(error));
 }
 
 void MapNode::InputFinished(ExecNode* input, int total_batches) {
   DCHECK_EQ(input, inputs_[0]);
   EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
-  outputs_[0]->InputFinished(this, total_batches);
+  output_->InputFinished(this, total_batches);
   if (input_counter_.SetTotal(total_batches)) {
     this->Finish();
   }
@@ -395,17 +377,12 @@ Status MapNode::StartProducing() {
   return Status::OK();
 }
 
-void MapNode::PauseProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->PauseProducing(this, counter);
+void MapNode::PauseProducing(int32_t counter) {
+  inputs_[0]->PauseProducing(counter);
 }
 
-void MapNode::ResumeProducing(ExecNode* output, int32_t counter) {
-  inputs_[0]->ResumeProducing(this, counter);
-}
-
-void MapNode::StopProducing(ExecNode* output) {
-  DCHECK_EQ(output, outputs_[0]);
-  StopProducing();
+void MapNode::ResumeProducing(int32_t counter) {
+  inputs_[0]->ResumeProducing(counter);
 }
 
 void MapNode::StopProducing() {
@@ -416,7 +393,7 @@ void MapNode::StopProducing() {
   if (input_counter_.Cancel()) {
     this->Finish();
   }
-  inputs_[0]->StopProducing(this);
+  inputs_[0]->StopProducing();
 }
 
 Future<> MapNode::finished() { return finished_; }
@@ -436,7 +413,7 @@ void MapNode::SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn,
       return output_batch.status();
     }
     output_batch->guarantee = guarantee;
-    outputs_[0]->InputReceived(this, output_batch.MoveValueUnsafe());
+    output_->InputReceived(this, output_batch.MoveValueUnsafe());
     return Status::OK();
   };
 
@@ -445,7 +422,7 @@ void MapNode::SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn,
     if (input_counter_.Cancel()) {
       this->Finish(status);
     }
-    inputs_[0]->StopProducing(this);
+    inputs_[0]->StopProducing();
     return;
   }
   if (input_counter_.Increment()) {

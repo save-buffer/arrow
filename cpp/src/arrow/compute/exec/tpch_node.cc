@@ -3364,7 +3364,7 @@ class TpchNode : public ExecNode {
  public:
   TpchNode(ExecPlan* plan, const char* name,
            std::unique_ptr<TpchTableGenerator> generator)
-      : ExecNode(plan, {}, {}, generator->schema(), /*num_outputs=*/1),
+      : ExecNode(plan, {}, {}, generator->schema()),
         name_(name),
         generator_(std::move(generator)) {}
 
@@ -3390,16 +3390,11 @@ class TpchNode : public ExecNode {
         });
   }
 
-  void PauseProducing(ExecNode* output, int32_t counter) override {
+  void PauseProducing(int32_t counter) override {
     // TODO(ARROW-16087)
   }
-  void ResumeProducing(ExecNode* output, int32_t counter) override {
+  void ResumeProducing(int32_t counter) override {
     // TODO(ARROW-16087)
-  }
-
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
   }
 
   void StopProducing() override {
@@ -3410,11 +3405,11 @@ class TpchNode : public ExecNode {
 
  private:
   void OutputBatchCallback(ExecBatch batch) {
-    outputs_[0]->InputReceived(this, std::move(batch));
+    output_->InputReceived(this, std::move(batch));
   }
 
   void FinishedCallback(int64_t total_num_batches) {
-    outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
+    output_->InputFinished(this, static_cast<int>(total_num_batches));
     std::ignore = task_group_.End();
   }
 
