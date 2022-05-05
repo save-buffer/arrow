@@ -37,8 +37,8 @@ namespace {
 class FilterNode : public MapNode {
  public:
   FilterNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-             std::shared_ptr<Schema> output_schema, Expression filter, bool async_mode)
-      : MapNode(plan, std::move(inputs), std::move(output_schema), async_mode),
+             std::shared_ptr<Schema> output_schema, Expression filter)
+      : MapNode(plan, std::move(inputs), std::move(output_schema)),
         filter_(std::move(filter)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -59,8 +59,8 @@ class FilterNode : public MapNode {
                                filter_expression.type()->ToString());
     }
     return plan->EmplaceNode<FilterNode>(plan, std::move(inputs), std::move(schema),
-                                         std::move(filter_expression),
-                                         filter_options.async_mode);
+                                         std::move(filter_expression));
+                                         
   }
 
   const char* kind_name() const override { return "FilterNode"; }
@@ -98,7 +98,7 @@ class FilterNode : public MapNode {
     return ExecBatch::Make(std::move(values));
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
     auto func = [this](ExecBatch batch) {
@@ -112,7 +112,7 @@ class FilterNode : public MapNode {
       END_SPAN(span);
       return result;
     };
-    this->SubmitTask(std::move(func), std::move(batch));
+    return this->DoMap(thread_index, std::move(func), std::move(batch));
   }
 
  protected:

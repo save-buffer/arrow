@@ -45,28 +45,21 @@ using internal::MapVector;
 namespace compute {
 namespace {
 
-struct SourceNode : ExecNode {
-  SourceNode(ExecPlan* plan, std::shared_ptr<Schema> output_schema,
+struct AsyncGenSourceNode : SourceNode {
+  AsyncGenSourceNode(ExecPlan* plan, std::shared_ptr<Schema> output_schema,
              AsyncGenerator<util::optional<ExecBatch>> generator)
-      : ExecNode(plan, {}, {}, std::move(output_schema)),
+      : SourceNode(plan, std::move(output_schema)),
         generator_(std::move(generator)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {
-    RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 0, "SourceNode"));
+    RETURN_NOT_OK(ValidateExecNodeInputs(plan, inputs, 0, "AsyncGenSourceNode"));
     const auto& source_options = checked_cast<const SourceNodeOptions&>(options);
-    return plan->EmplaceNode<SourceNode>(plan, source_options.output_schema,
-                                         source_options.generator);
+    return plan->EmplaceNode<AsyncGenSourceNode>(plan, source_options.output_schema,
+                                                       source_options.generator);
   }
 
-  const char* kind_name() const override { return "SourceNode"; }
-
-  [[noreturn]] static void NoInputs() {
-    Unreachable("no inputs; this should never be called");
-  }
-  [[noreturn]] void InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
-  [[noreturn]] void ErrorReceived(ExecNode*, Status) override { NoInputs(); }
-  [[noreturn]] void InputFinished(ExecNode*, int) override { NoInputs(); }
+  const char* kind_name() const override { return "AsyncGenSourceNode"; }
 
   Status StartProducing() override {
     START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
@@ -74,87 +67,29 @@ struct SourceNode : ExecNode {
                         {"node.label", label()},
                         {"node.output_schema", output_schema()->ToString()},
                         {"node.detail", ToString()}});
-    {
-      // If another exec node encountered an error during its StartProducing call
-      // it might have already called StopProducing on all of its inputs (including this
-      // node).
-      //
-      std::unique_lock<std::mutex> lock(mutex_);
-      if (stop_requested_) {
-        return Status::OK();
-      }
-    }
 
-    CallbackOptions options;
     auto executor = plan()->exec_context()->executor();
-    if (executor) {
-      // These options will transfer execution to the desired Executor if necessary.
-      // This can happen for in-memory scans where batches didn't require
-      // any CPU work to decode. Otherwise, parsing etc should have already
-      // been placed us on the desired Executor and no queues will be pushed to.
-      options.executor = executor;
-      options.should_schedule = ShouldSchedule::IfDifferentExecutor;
-    }
-    finished_ = Loop([this, executor, options] {
-                  std::unique_lock<std::mutex> lock(mutex_);
-                  int total_batches = batch_count_++;
-                  if (stop_requested_) {
-                    return Future<ControlFlow<int>>::MakeFinished(Break(total_batches));
-                  }
-                  lock.unlock();
-
-                  return generator_().Then(
-                      [=](const util::optional<ExecBatch>& maybe_batch)
-                          -> Future<ControlFlow<int>> {
-                        std::unique_lock<std::mutex> lock(mutex_);
-                        if (IsIterationEnd(maybe_batch) || stop_requested_) {
-                          stop_requested_ = true;
-                          return Break(total_batches);
-                        }
-                        lock.unlock();
-                        ExecBatch batch = std::move(*maybe_batch);
-
-                        if (executor) {
-                          auto status = task_group_.AddTask(
-                              [this, executor, batch]() -> Result<Future<>> {
-                                return executor->Submit([=]() {
-                                  output_->InputReceived(this, std::move(batch));
-                                  return Status::OK();
-                                });
-                              });
-                          if (!status.ok()) {
-                            output_->ErrorReceived(this, std::move(status));
-                            return Break(total_batches);
-                          }
-                        } else {
-                          output_->InputReceived(this, std::move(batch));
-                        }
-                        lock.lock();
-                        if (!backpressure_future_.is_finished()) {
-                          EVENT(span_, "Source paused due to backpressure");
-                          return backpressure_future_.Then(
-                              []() -> ControlFlow<int> { return Continue(); });
-                        }
-                        return Future<ControlFlow<int>>::MakeFinished(Continue());
-                      },
-                      [=](const Status& error) -> ControlFlow<int> {
-                        // NB: ErrorReceived is independent of InputFinished, but
-                        // ErrorReceived will usually prompt StopProducing which will
-                        // prompt InputFinished. ErrorReceived may still be called from a
-                        // node which was requested to stop (indeed, the request to stop
-                        // may prompt an error).
-                        std::unique_lock<std::mutex> lock(mutex_);
-                        stop_requested_ = true;
-                        lock.unlock();
-                        output_->ErrorReceived(this, error);
-                        return Break(total_batches);
-                      },
-                      options);
-                }).Then([&](int total_batches) {
-      output_->InputFinished(this, total_batches);
-      return task_group_.End();
-    });
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
+    ARROW_DCHECK(executor);
+#if 0
+    RETURN_NOT_OK(plan_->AddFuture(this->GenerateFuture()));
+#endif
+    return plan_->AddFuture(
+        VisitAsyncGenerator(generator_,
+                            [this](util::optional<ExecBatch> maybe_batch)
+                            {
+                                if(maybe_batch.has_value())
+                                {
+                                    size_t thread_index = plan()->GetThreadIndex();
+                                    RETURN_NOT_OK(output_->InputReceived(thread_index, this, std::move(*maybe_batch)));
+                                    batches_outputted_.fetch_add(1);
+                                }
+                                return Status::OK();
+                            }).Then(
+                                [this]()
+                                {
+                                    size_t thread_index = plan()->GetThreadIndex();
+                                    return output_->InputFinished(thread_index, this, static_cast<int>(batches_outputted_.load()));
+                                }));
     return Status::OK();
   }
 
@@ -187,26 +122,62 @@ struct SourceNode : ExecNode {
     to_finish.MarkFinished();
   }
 
-  void StopProducing() override {
-    std::unique_lock<std::mutex> lock(mutex_);
-    stop_requested_ = true;
-  }
-
   Future<> finished() override { return finished_; }
 
  private:
+#if 0
+    Future<> GenerateFuture()
+    {
+        CallbackOptions options;
+        options.executor = plan()->exec_context()->executor();
+        options.should_schedule = ShouldSchedule::IfDifferentExecutor;
+        return generator_().Then(
+            [this](const util::optional<ExecBatch> &maybe_batch)
+            {
+                if(done_.load())
+                {
+                    ARROW_DCHECK(!maybe_batch.has_value()) << "Got a valid batch after supposedly finishing";
+                    return Status::OK();
+                }
+
+                size_t thread_index = plan()->GetThreadIndex();
+                if(maybe_batch.has_value())
+                {
+                    threads_outputting_.fetch_add(1);
+                    RETURN_NOT_OK(output_->InputReceived(thread_index, this, std::move(*maybe_batch)));
+                    batches_outputted_.fetch_add(1);
+                    threads_outputting_.fetch_sub(1);
+                    RETURN_NOT_OK(plan_->AddFuture(this->GenerateFuture()));
+                }
+                else
+                {
+                    if(threads_outputting_.load() == 0)
+                    {
+                        bool expected = false;
+                        if(done_.compare_exchange_strong(expected, true))
+                        {
+                            RETURN_NOT_OK(output_->InputFinished(thread_index, this, static_cast<int>(batches_outputted_.load())));
+                            END_SPAN(span_);
+                        }
+                    }
+                }
+                return Status::OK();
+            }, {}, options);
+    }
+  std::atomic<bool> done_;
+  std::atomic<int64_t> threads_outputting_{0};
+#endif
+
+  std::atomic<int64_t> batches_outputted_{0};
   std::mutex mutex_;
   int32_t backpressure_counter_{0};
   Future<> backpressure_future_ = Future<>::MakeFinished();
-  bool stop_requested_{false};
-  int batch_count_{0};
-  util::AsyncTaskGroup task_group_;
   AsyncGenerator<util::optional<ExecBatch>> generator_;
 };
 
-struct TableSourceNode : public SourceNode {
+struct TableSourceNode : public AsyncGenSourceNode {
   TableSourceNode(ExecPlan* plan, std::shared_ptr<Table> table, int64_t batch_size)
-      : SourceNode(plan, table->schema(), TableGenerator(*table, batch_size)) {}
+      : AsyncGenSourceNode(plan, table->schema(), TableGenerator(*table, batch_size)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {
@@ -276,7 +247,7 @@ struct TableSourceNode : public SourceNode {
 namespace internal {
 
 void RegisterSourceNode(ExecFactoryRegistry* registry) {
-  DCHECK_OK(registry->AddFactory("source", SourceNode::Make));
+  DCHECK_OK(registry->AddFactory("asyncgen_source", AsyncGenSourceNode::Make));
   DCHECK_OK(registry->AddFactory("table_source", TableSourceNode::Make));
 }
 

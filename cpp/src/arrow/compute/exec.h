@@ -31,6 +31,7 @@
 #include "arrow/compute/exec/expression.h"
 #include "arrow/datum.h"
 #include "arrow/memory_pool.h"
+#include "arrow/util/thread_pool.h"
 #include "arrow/result.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/macros.h"
@@ -61,7 +62,7 @@ class ARROW_EXPORT ExecContext {
  public:
   // If no function registry passed, the default is used.
   explicit ExecContext(MemoryPool* pool = default_memory_pool(),
-                       ::arrow::internal::Executor* executor = NULLPTR,
+                       ::arrow::internal::Executor* executor = ::arrow::internal::GetCpuThreadPool(),
                        FunctionRegistry* func_registry = NULLPTR);
 
   /// \brief The MemoryPool used for allocations, default is

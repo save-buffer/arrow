@@ -34,7 +34,7 @@ class TaskSchedulerImpl : public TaskScheduler {
   Status ExecuteMore(size_t thread_id, int num_tasks_to_execute,
                      bool execute_all) override;
   Status StartScheduling(size_t thread_id, ScheduleImpl schedule_impl,
-                         int num_concurrent_tasks, bool use_sync_execution) override;
+                         int num_concurrent_tasks) override;
   void Abort(AbortContinuationImpl impl) override;
 
  private:
@@ -84,7 +84,6 @@ class TaskSchedulerImpl : public TaskScheduler {
                              bool* all_task_groups_finished);
   Status ScheduleMore(size_t thread_id, int num_tasks_finished = 0);
 
-  bool use_sync_execution_;
   int num_concurrent_tasks_;
   ScheduleImpl schedule_impl_;
   AbortContinuationImpl abort_cont_impl_;
@@ -99,8 +98,7 @@ class TaskSchedulerImpl : public TaskScheduler {
 };
 
 TaskSchedulerImpl::TaskSchedulerImpl()
-    : use_sync_execution_(false),
-      num_concurrent_tasks_(0),
+    : num_concurrent_tasks_(0),
       aborted_(false),
       register_finished_(false) {
   num_tasks_to_schedule_.value.store(0);
@@ -306,10 +304,8 @@ Status TaskSchedulerImpl::ExecuteMore(size_t thread_id, int num_tasks_to_execute
 }
 
 Status TaskSchedulerImpl::StartScheduling(size_t thread_id, ScheduleImpl schedule_impl,
-                                          int num_concurrent_tasks,
-                                          bool use_sync_execution) {
+                                          int num_concurrent_tasks) {
   schedule_impl_ = std::move(schedule_impl);
-  use_sync_execution_ = use_sync_execution;
   num_concurrent_tasks_ = num_concurrent_tasks;
   num_tasks_to_schedule_.value += num_concurrent_tasks;
   return ScheduleMore(thread_id);
@@ -321,10 +317,6 @@ Status TaskSchedulerImpl::ScheduleMore(size_t thread_id, int num_tasks_finished)
   }
 
   ARROW_DCHECK(register_finished_);
-
-  if (use_sync_execution_) {
-    return ExecuteMore(thread_id, 1, true);
-  }
 
   int num_new_tasks = num_tasks_finished;
   for (;;) {

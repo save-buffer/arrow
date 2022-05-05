@@ -513,82 +513,54 @@ class HashJoinNode : public ExecNode {
 
   const char* kind_name() const override { return "HashJoinNode"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
     if (complete_.load()) {
-      return;
+        return Status::OK();
     }
 
-    size_t thread_index = thread_indexer_();
     int side = (input == inputs_[0]) ? 0 : 1;
 
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}, {"side", side}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
                                    {{"batch.length", batch.length}});
+    RETURN_NOT_OK(impl_->InputReceived(thread_index, side, std::move(batch)));
 
-    {
-      Status status = impl_->InputReceived(thread_index, side, std::move(batch));
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
-    }
     if (batch_count_[side].Increment()) {
-      Status status = impl_->InputFinished(thread_index, side);
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
+      RETURN_NOT_OK(impl_->InputFinished(thread_index, side));
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-    StopProducing();
-    output_->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
 
-    size_t thread_index = thread_indexer_();
     int side = (input == inputs_[0]) ? 0 : 1;
 
     EVENT(span_, "InputFinished", {{"side", side}, {"batches.length", total_batches}});
 
     if (batch_count_[side].SetTotal(total_batches)) {
-      Status status = impl_->InputFinished(thread_index, side);
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
+        RETURN_NOT_OK(impl_->InputFinished(thread_index, side));
     }
+    return Status::OK();
   }
 
-  Status StartProducing() override {
+  Status Init() override {
     START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
                        {{"node.label", label()},
                         {"node.detail", ToString()},
                         {"node.kind", kind_name()}});
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished(), this);
 
-    bool use_sync_execution = !(plan_->exec_context()->executor());
-    size_t num_threads = use_sync_execution ? 1 : thread_indexer_.Capacity();
-
-    RETURN_NOT_OK(impl_->Init(
-        plan_->exec_context(), join_type_, use_sync_execution, num_threads,
+    size_t num_threads = plan_->num_threads();
+    return impl_->Init(
+        plan_->exec_context(), join_type_, num_threads,
         schema_mgr_.get(), key_cmp_, filter_,
-        [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
-        [this](int64_t total_num_batches) { this->FinishedCallback(total_num_batches); },
+        [this](size_t thread_index, ExecBatch batch) { return this->OutputBatchCallback(thread_index, batch); },
+        [this](size_t thread_index, int64_t total_num_batches) { return this->FinishedCallback(thread_index, total_num_batches); },
         [this](std::function<Status(size_t)> func) -> Status {
-          return this->ScheduleTaskCallback(std::move(func));
-        }));
-    return Status::OK();
+            return this->ScheduleTaskCallback(std::move(func));
+        });
   }
 
   void PauseProducing(int32_t counter) override {
@@ -599,50 +571,22 @@ class HashJoinNode : public ExecNode {
     // TODO(ARROW-16246)
   }
 
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-    bool expected = false;
-    if (complete_.compare_exchange_strong(expected, true)) {
-      for (auto&& input : inputs_) {
-        input->StopProducing();
-      }
-      impl_->Abort([this]() { ARROW_UNUSED(task_group_.End()); });
-    }
-  }
-
-  Future<> finished() override { return task_group_.OnFinished(); }
-
  private:
-  void OutputBatchCallback(ExecBatch batch) {
-      output_->InputReceived(this, std::move(batch));
+  Status OutputBatchCallback(size_t thread_index, ExecBatch batch) {
+      return output_->InputReceived(thread_index, this, std::move(batch));
   }
 
-  void FinishedCallback(int64_t total_num_batches) {
+  Status FinishedCallback(size_t thread_index, int64_t total_num_batches) {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
-      output_->InputFinished(this, static_cast<int>(total_num_batches));
-      ARROW_UNUSED(task_group_.End());
+      END_SPAN(span_);
+      return output_->InputFinished(thread_index, this, static_cast<int>(total_num_batches));
     }
+    return Status::OK();
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
-    auto executor = plan_->exec_context()->executor();
-    if (executor) {
-      ARROW_ASSIGN_OR_RAISE(auto task_fut, executor->Submit([this, func] {
-        size_t thread_index = thread_indexer_();
-        Status status = func(thread_index);
-        if (!status.ok()) {
-          StopProducing();
-          ErrorIfNotOk(status);
-          return;
-        }
-      }));
-      return task_group_.AddTask(task_fut);
-    } else {
-      // We should not get here in serial execution mode
-      ARROW_DCHECK(false);
-    }
-    return Status::OK();
+      return plan_->ScheduleTask(back_pressure_, std::move(func));
   }
 
  private:
@@ -651,10 +595,9 @@ class HashJoinNode : public ExecNode {
   JoinType join_type_;
   std::vector<JoinKeyCmp> key_cmp_;
   Expression filter_;
-  ThreadIndexer thread_indexer_;
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> impl_;
-  util::AsyncTaskGroup task_group_;
+  std::atomic<bool> back_pressure_{false};
 };
 
 namespace internal {

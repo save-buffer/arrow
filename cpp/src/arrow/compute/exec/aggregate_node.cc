@@ -187,7 +187,7 @@ class ScalarAggregateNode : public ExecNode {
     return Status::OK();
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
@@ -196,38 +196,28 @@ class ScalarAggregateNode : public ExecNode {
                                     {"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
 
-    auto thread_index = get_thread_index_();
-
-    if (ErrorIfNotOk(DoConsume(std::move(batch), thread_index))) return;
+    RETURN_NOT_OK(DoConsume(std::move(batch), thread_index));
 
     if (input_counter_.Increment()) {
-      ErrorIfNotOk(Finish());
+      return Finish(thread_index);
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-    output_->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
     DCHECK_EQ(input, inputs_[0]);
     if (input_counter_.SetTotal(total_batches)) {
-      ErrorIfNotOk(Finish());
+      return Finish(thread_index);
     }
+    return Status::OK();
   }
 
-  Status StartProducing() override {
+  Status Init() override {
     START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
                        {{"node.label", label()},
                         {"node.detail", ToString()},
                         {"node.kind", kind_name()}});
-    finished_ = Future<>::Make();
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
-    // Scalar aggregates will only output a single batch
-    output_->InputFinished(this, 1);
     return Status::OK();
   }
 
@@ -239,16 +229,6 @@ class ScalarAggregateNode : public ExecNode {
     inputs_[0]->ResumeProducing(counter);
   }
 
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-    if (input_counter_.Cancel()) {
-      finished_.MarkFinished();
-    }
-    inputs_[0]->StopProducing();
-  }
-
-  Future<> finished() override { return finished_; }
-
  protected:
   std::string ToStringExtra(int indent = 0) const override {
     std::stringstream ss;
@@ -258,7 +238,7 @@ class ScalarAggregateNode : public ExecNode {
   }
 
  private:
-  Status Finish() {
+  Status Finish(size_t thread_index) {
     util::tracing::Span span;
     START_COMPUTE_SPAN(span, "Finish",
                        {{"aggregate", ToStringExtra()}, {"node.label", label()}});
@@ -277,9 +257,10 @@ class ScalarAggregateNode : public ExecNode {
                                              kernels_[i], &ctx, std::move(states_[i])));
       RETURN_NOT_OK(kernels_[i]->finalize(&ctx, &batch.values[i]));
     }
-
-    output_->InputReceived(this, std::move(batch));
-    finished_.MarkFinished();
+    END_SPAN(span);
+    RETURN_NOT_OK(output_->InputReceived(thread_index, this, std::move(batch)));
+    RETURN_NOT_OK(output_->InputFinished(thread_index, this, 1));
+    END_SPAN(span_);
     return Status::OK();
   }
 
@@ -290,7 +271,6 @@ class ScalarAggregateNode : public ExecNode {
   std::vector<std::vector<std::unique_ptr<KernelState>>> states_;
   const std::vector<std::unique_ptr<FunctionOptions>> owned_options_;
 
-  ThreadIndexer get_thread_index_;
   AtomicCounter input_counter_;
 };
 
@@ -388,13 +368,12 @@ class GroupByNode : public ExecNode {
 
   const char* kind_name() const override { return "GroupByNode"; }
 
-  Status Consume(ExecBatch batch) {
+  Status Consume(size_t thread_index, ExecBatch batch) {
     util::tracing::Span span;
     START_COMPUTE_SPAN(span, "Consume",
                        {{"group_by", ToStringExtra()},
                         {"node.label", label()},
                         {"batch.length", batch.length}});
-    size_t thread_index = get_thread_index_();
     if (thread_index >= local_states_.size()) {
       return Status::IndexError("thread index ", thread_index, " is out of range [0, ",
                                 local_states_.size(), ")");
@@ -504,48 +483,32 @@ class GroupByNode : public ExecNode {
 
     if (output_counter_.SetTotal(
             static_cast<int>(bit_util::CeilDiv(out_data.length, output_batch_size())))) {
-      // this will be hit if out_data.length == 0
-      finished_.MarkFinished();
     }
     return out_data;
   }
 
-  void OutputNthBatch(int n) {
-    // bail if StopProducing was called
-    if (finished_.is_finished()) return;
-
+  Status OutputNthBatch(size_t thread_index, int n) {
     int64_t batch_size = output_batch_size();
-    output_->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
+    RETURN_NOT_OK(output_->InputReceived(thread_index, this, out_data_.Slice(batch_size * n, batch_size)));
 
     if (output_counter_.Increment()) {
       finished_.MarkFinished();
     }
+    return Status::OK();
   }
 
-  Status OutputResult() {
+  Status OutputResult(size_t thread_index) {
     RETURN_NOT_OK(Merge());
     ARROW_ASSIGN_OR_RAISE(out_data_, Finalize());
 
     int num_output_batches = *output_counter_.total();
-    output_->InputFinished(this, num_output_batches);
-
-    auto executor = ctx_->executor();
-    for (int i = 0; i < num_output_batches; ++i) {
-      if (executor) {
-        // bail if StopProducing was called
-        if (finished_.is_finished()) break;
-
-        auto plan = this->plan()->shared_from_this();
-        RETURN_NOT_OK(executor->Spawn([plan, this, i] { OutputNthBatch(i); }));
-      } else {
-        OutputNthBatch(i);
-      }
-    }
-
-    return Status::OK();
+    for(int i = 0; i < num_output_batches; i++)
+        RETURN_NOT_OK(plan_->ScheduleTask(pause_toggle,
+                                          [this, i](size_t thread_index) { return OutputNthBatch(thread_index, i); }));
+    return output_->InputFinished(thread_index, this, num_output_batches);
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
@@ -553,48 +516,35 @@ class GroupByNode : public ExecNode {
                                     {"node.label", label()},
                                     {"batch.length", batch.length}});
 
-    // bail if StopProducing was called
-    if (finished_.is_finished()) return;
 
     DCHECK_EQ(input, inputs_[0]);
 
-    if (ErrorIfNotOk(Consume(std::move(batch)))) return;
+    RETURN_NOT_OK(Consume(thread_index, std::move(batch)));
 
     if (input_counter_.Increment()) {
-      ErrorIfNotOk(OutputResult());
+        return OutputResult(thread_index);
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-
-    DCHECK_EQ(input, inputs_[0]);
-
-    output_->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
-    EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
-
-    // bail if StopProducing was called
-    if (finished_.is_finished()) return;
+  Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override {
+    END_SPAN(span_);
 
     DCHECK_EQ(input, inputs_[0]);
 
     if (input_counter_.SetTotal(total_batches)) {
-      ErrorIfNotOk(OutputResult());
+      return OutputResult(thread_index);
     }
+    return Status::OK();
   }
 
-  Status StartProducing() override {
+  Status Init() override {
     START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
                        {{"node.label", label()},
                         {"node.detail", ToString()},
                         {"node.kind", kind_name()}});
-    finished_ = Future<>::Make();
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
 
-    local_states_.resize(ThreadIndexer::Capacity());
+    local_states_.resize(plan_->num_threads());
     return Status::OK();
   }
 
@@ -607,18 +557,6 @@ class GroupByNode : public ExecNode {
     // TODO(ARROW-16260)
     // Without spillover there is way to handle backpressure in this node
   }
-
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-
-    ARROW_UNUSED(input_counter_.Cancel());
-    if (output_counter_.Cancel()) {
-      finished_.MarkFinished();
-    }
-    inputs_[0]->StopProducing();
-  }
-
-  Future<> finished() override { return finished_; }
 
  protected:
   std::string ToStringExtra(int indent = 0) const override {
@@ -640,11 +578,6 @@ class GroupByNode : public ExecNode {
     std::unique_ptr<internal::Grouper> grouper;
     std::vector<std::unique_ptr<KernelState>> agg_states;
   };
-
-  ThreadLocalState* GetLocalState() {
-    size_t thread_index = get_thread_index_();
-    return &local_states_[thread_index];
-  }
 
   Status InitLocalStateIfNeeded(ThreadLocalState* state) {
     // Get input schema
@@ -694,11 +627,11 @@ class GroupByNode : public ExecNode {
   // ARROW-13638: must hold owned copy of function options
   const std::vector<std::unique_ptr<FunctionOptions>> owned_options_;
 
-  ThreadIndexer get_thread_index_;
   AtomicCounter input_counter_, output_counter_;
 
   std::vector<ThreadLocalState> local_states_;
   ExecBatch out_data_;
+  std::atomic<bool> pause_toggle;
 };
 
 }  // namespace

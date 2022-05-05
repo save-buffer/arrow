@@ -89,28 +89,28 @@ class ARROW_EXPORT Executor {
   template <typename Function>
   Status Spawn(Function&& func) {
     return SpawnReal(TaskHints{}, std::forward<Function>(func), StopToken::Unstoppable(),
-                     StopCallback{});
+                     StopCallback{}, NULLPTR);
   }
   template <typename Function>
   Status Spawn(Function&& func, StopToken stop_token) {
     return SpawnReal(TaskHints{}, std::forward<Function>(func), std::move(stop_token),
-                     StopCallback{});
+                     StopCallback{}, NULLPTR);
   }
   template <typename Function>
   Status Spawn(TaskHints hints, Function&& func) {
     return SpawnReal(hints, std::forward<Function>(func), StopToken::Unstoppable(),
-                     StopCallback{});
+                     StopCallback{}, NULLPTR);
   }
   template <typename Function>
   Status Spawn(TaskHints hints, Function&& func, StopToken stop_token) {
     return SpawnReal(hints, std::forward<Function>(func), std::move(stop_token),
-                     StopCallback{});
+                     StopCallback{}, NULLPTR);
   }
   template <typename Function>
   Status Spawn(TaskHints hints, Function&& func, StopToken stop_token,
-               StopCallback stop_callback) {
+               StopCallback stop_callback, const std::atomic<bool> *pause_toggle) {
     return SpawnReal(hints, std::forward<Function>(func), std::move(stop_token),
-                     std::move(stop_callback));
+                     std::move(stop_callback), pause_toggle);
   }
 
   // Transfers a future to this executor.  Any continuations added to the
@@ -147,8 +147,8 @@ class ARROW_EXPORT Executor {
   template <typename Function, typename... Args,
             typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
                 Function && (Args && ...)>>
-  Result<FutureType> Submit(TaskHints hints, StopToken stop_token, Function&& func,
-                            Args&&... args) {
+  Result<FutureType> Submit(TaskHints hints, StopToken stop_token, const std::atomic<bool> *pause_toggle,
+                            Function&& func, Args&&... args) {
     using ValueType = typename FutureType::ValueType;
 
     auto future = FutureType::Make();
@@ -165,7 +165,7 @@ class ARROW_EXPORT Executor {
       }
     } stop_callback{WeakFuture<ValueType>(future)};
     ARROW_RETURN_NOT_OK(SpawnReal(hints, std::move(task), std::move(stop_token),
-                                  std::move(stop_callback)));
+                                  std::move(stop_callback), pause_toggle));
 
     return future;
   }
@@ -173,8 +173,24 @@ class ARROW_EXPORT Executor {
   template <typename Function, typename... Args,
             typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
                 Function && (Args && ...)>>
+  Result<FutureType> Submit(TaskHints hints, StopToken stop_token, Function&& func, Args&&... args) {
+      return Submit(std::move(hints), std::move(stop_token), NULLPTR, std::forward<Function>(func),
+                  std::forward<Args>(args)...);
+  }
+
+  template <typename Function, typename... Args,
+            typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
+                Function && (Args && ...)>>
+  Result<FutureType> Submit(StopToken stop_token, const std::atomic<bool> *pause_toggle, Function&& func, Args&&... args) {
+      return Submit(TaskHints{}, std::move(stop_token), pause_toggle, std::forward<Function>(func),
+                  std::forward<Args>(args)...);
+  }
+
+  template <typename Function, typename... Args,
+            typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
+                Function && (Args && ...)>>
   Result<FutureType> Submit(StopToken stop_token, Function&& func, Args&&... args) {
-    return Submit(TaskHints{}, stop_token, std::forward<Function>(func),
+      return Submit(TaskHints{}, stop_token, NULLPTR, std::forward<Function>(func),
                   std::forward<Args>(args)...);
   }
 
@@ -182,15 +198,23 @@ class ARROW_EXPORT Executor {
             typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
                 Function && (Args && ...)>>
   Result<FutureType> Submit(TaskHints hints, Function&& func, Args&&... args) {
-    return Submit(std::move(hints), StopToken::Unstoppable(),
+      return Submit(std::move(hints), StopToken::Unstoppable(), NULLPTR, 
                   std::forward<Function>(func), std::forward<Args>(args)...);
   }
 
   template <typename Function, typename... Args,
             typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
                 Function && (Args && ...)>>
+  Result<FutureType> Submit(const std::atomic<bool> *pause_toggle, Function&& func, Args&&... args) {
+      return Submit(TaskHints{}, StopToken::Unstoppable(), pause_toggle, std::forward<Function>(func),
+                  std::forward<Args>(args)...);
+  }
+
+  template <typename Function, typename... Args,
+            typename FutureType = typename ::arrow::detail::ContinueFuture::ForSignature<
+                Function && (Args && ...)>>
   Result<FutureType> Submit(Function&& func, Args&&... args) {
-    return Submit(TaskHints{}, StopToken::Unstoppable(), std::forward<Function>(func),
+      return Submit(TaskHints{}, StopToken::Unstoppable(), NULLPTR, std::forward<Function>(func),
                   std::forward<Args>(args)...);
   }
 
@@ -263,7 +287,7 @@ class ARROW_EXPORT Executor {
 
   // Subclassing API
   virtual Status SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken,
-                           StopCallback&&) = 0;
+                           StopCallback&&, const std::atomic<bool> *pause_toggle) = 0;
 };
 
 /// \brief An executor implementation that runs all tasks on a single thread using an
@@ -281,7 +305,7 @@ class ARROW_EXPORT SerialExecutor : public Executor {
 
   int GetCapacity() override { return 1; };
   Status SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken,
-                   StopCallback&&) override;
+                   StopCallback&&, const std::atomic<bool> *pause_toggle) override;
 
   /// \brief Runs the TopLevelTask and any scheduled tasks
   ///
@@ -467,7 +491,7 @@ class ARROW_EXPORT ThreadPool : public Executor {
   ThreadPool();
 
   Status SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken,
-                   StopCallback&&) override;
+                   StopCallback&&, const std::atomic<bool> *pause_toggle) override;
 
   // Collect finished worker threads, making sure the OS threads have exited
   void CollectFinishedWorkersUnlocked();

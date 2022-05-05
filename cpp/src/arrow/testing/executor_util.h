@@ -27,7 +27,7 @@ class MockExecutor : public internal::Executor {
   int GetCapacity() override { return 0; }
 
   Status SpawnReal(internal::TaskHints hints, internal::FnOnce<void()> task, StopToken,
-                   StopCallback&&) override {
+                   StopCallback&&, const std::atomic<bool> *) override {
     spawn_count++;
     std::move(task)();
     return Status::OK();
@@ -44,7 +44,7 @@ class DelayedExecutor : public internal::Executor {
   int GetCapacity() override { return 0; }
 
   Status SpawnReal(internal::TaskHints hints, internal::FnOnce<void()> task, StopToken,
-                   StopCallback&&) override {
+                   StopCallback&&, const std::atomic<bool> *) override {
     captured_tasks.push_back(std::move(task));
     return Status::OK();
   }

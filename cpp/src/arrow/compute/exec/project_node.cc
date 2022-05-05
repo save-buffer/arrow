@@ -40,9 +40,8 @@ namespace {
 class ProjectNode : public MapNode {
  public:
   ProjectNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-              std::shared_ptr<Schema> output_schema, std::vector<Expression> exprs,
-              bool async_mode)
-      : MapNode(plan, std::move(inputs), std::move(output_schema), async_mode),
+              std::shared_ptr<Schema> output_schema, std::vector<Expression> exprs)
+      : MapNode(plan, std::move(inputs), std::move(output_schema)),
         exprs_(std::move(exprs)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -70,11 +69,12 @@ class ProjectNode : public MapNode {
       ++i;
     }
     return plan->EmplaceNode<ProjectNode>(plan, std::move(inputs),
-                                          schema(std::move(fields)), std::move(exprs),
-                                          project_options.async_mode);
+                                          schema(std::move(fields)), std::move(exprs));
   }
 
   const char* kind_name() const override { return "ProjectNode"; }
+
+  Status Init() override { return Status::OK(); }
 
   Result<ExecBatch> DoProject(const ExecBatch& target) {
     std::vector<Datum> values{exprs_.size()};
@@ -93,7 +93,7 @@ class ProjectNode : public MapNode {
     return ExecBatch{std::move(values), target.length};
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
     auto func = [this](ExecBatch batch) {
@@ -107,7 +107,7 @@ class ProjectNode : public MapNode {
       END_SPAN(span);
       return result;
     };
-    this->SubmitTask(std::move(func), std::move(batch));
+    return this->DoMap(thread_index, std::move(func), std::move(batch));
   }
 
  protected:

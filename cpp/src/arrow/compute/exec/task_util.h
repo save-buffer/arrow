@@ -87,7 +87,7 @@ class TaskScheduler {
   //
   // It will automatically resume whenever new task group gets started.
   virtual Status StartScheduling(size_t thread_id, ScheduleImpl schedule_impl,
-                                 int num_concurrent_tasks, bool use_sync_execution) = 0;
+                                 int num_concurrent_tasks) = 0;
 
   // Abort scheduling and execution.
   // Used in case of being notified about unrecoverable error for the entire query.

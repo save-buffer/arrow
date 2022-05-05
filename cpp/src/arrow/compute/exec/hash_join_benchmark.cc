@@ -53,8 +53,6 @@ struct BenchmarkSettings {
 class JoinBenchmark {
  public:
   explicit JoinBenchmark(BenchmarkSettings& settings) {
-    bool is_parallel = settings.num_threads != 1;
-
     SchemaBuilder l_schema_builder, r_schema_builder;
     std::vector<FieldRef> left_keys, right_keys;
     for (size_t i = 0; i < settings.key_types.size(); i++) {
@@ -117,7 +115,7 @@ class JoinBenchmark {
 
     ctx_ = arrow::internal::make_unique<ExecContext>(
         default_memory_pool(),
-        is_parallel ? arrow::internal::GetCpuThreadPool() : nullptr);
+        arrow::internal::GetCpuThreadPool());
 
     schema_mgr_ = arrow::internal::make_unique<HashJoinSchema>();
     Expression filter = literal(true);
@@ -134,9 +132,9 @@ class JoinBenchmark {
     };
 
     DCHECK_OK(join_->Init(
-        ctx_.get(), settings.join_type, !is_parallel, settings.num_threads,
-        schema_mgr_.get(), {JoinKeyCmp::EQ}, std::move(filter), [](ExecBatch) {},
-        [](int64_t x) {}, schedule_callback));
+        ctx_.get(), settings.join_type, settings.num_threads,
+        schema_mgr_.get(), {JoinKeyCmp::EQ}, std::move(filter), [](size_t, ExecBatch) { return Status::OK(); },
+        [](size_t, int64_t) { return Status::OK(); }, schedule_callback));
   }
 
   void RunJoin() {

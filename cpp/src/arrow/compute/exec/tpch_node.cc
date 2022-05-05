@@ -492,8 +492,8 @@ bool TpchPseudotext::GenerateSentence(int64_t& offset, random::pcg32_fast& rng,
 
 class TpchTableGenerator {
  public:
-  using OutputBatchCallback = std::function<void(ExecBatch)>;
-  using FinishedCallback = std::function<void(int64_t)>;
+  using OutputBatchCallback = std::function<Status(size_t, ExecBatch)>;
+  using FinishedCallback = std::function<Status(size_t, int64_t)>;
   using GenerateFn = std::function<Status(size_t)>;
   using ScheduleCallback = std::function<Status(GenerateFn)>;
   using AbortCallback = std::function<void()>;
@@ -663,8 +663,7 @@ class PartAndPartSupplierGenerator {
     return SetOutputColumns(cols, kPartsuppTypes, kPartsuppNameMap, partsupp_cols_);
   }
 
-  Result<util::optional<ExecBatch>> NextPartBatch() {
-    size_t thread_index = thread_indexer_();
+  Result<util::optional<ExecBatch>> NextPartBatch(size_t thread_index) {
     ThreadLocalData& tld = thread_local_data_[thread_index];
     {
       std::lock_guard<std::mutex> lock(part_output_queue_mutex_);
@@ -719,8 +718,7 @@ class PartAndPartSupplierGenerator {
     return ExecBatch::Make(std::move(part_result));
   }
 
-  Result<util::optional<ExecBatch>> NextPartSuppBatch() {
-    size_t thread_index = thread_indexer_();
+  Result<util::optional<ExecBatch>> NextPartSuppBatch(size_t thread_index) {
     ThreadLocalData& tld = thread_local_data_[thread_index];
     {
       std::lock_guard<std::mutex> lock(partsupp_output_queue_mutex_);
@@ -1284,7 +1282,6 @@ class PartAndPartSupplierGenerator {
   int64_t part_rows_generated_{0};
   std::vector<int> part_cols_;
   std::vector<int> partsupp_cols_;
-  ThreadIndexer thread_indexer_;
 
   std::atomic<int64_t> part_batches_generated_ = {0};
   std::atomic<int64_t> partsupp_batches_generated_ = {0};
@@ -1326,8 +1323,7 @@ class OrdersAndLineItemGenerator {
     return SetOutputColumns(cols, kLineitemTypes, kLineitemNameMap, lineitem_cols_);
   }
 
-  Result<util::optional<ExecBatch>> NextOrdersBatch() {
-    size_t thread_index = thread_indexer_();
+  Result<util::optional<ExecBatch>> NextOrdersBatch(size_t thread_index) {
     ThreadLocalData& tld = thread_local_data_[thread_index];
     {
       std::lock_guard<std::mutex> lock(orders_output_queue_mutex_);
@@ -1382,8 +1378,7 @@ class OrdersAndLineItemGenerator {
     return ExecBatch::Make(std::move(orders_result));
   }
 
-  Result<util::optional<ExecBatch>> NextLineItemBatch() {
-    size_t thread_index = thread_indexer_();
+  Result<util::optional<ExecBatch>> NextLineItemBatch(size_t thread_index) {
     ThreadLocalData& tld = thread_local_data_[thread_index];
     ExecBatch queued;
     bool from_queue = false;
@@ -2400,7 +2395,6 @@ class OrdersAndLineItemGenerator {
   int64_t orders_rows_generated_;
   std::vector<int> orders_cols_;
   std::vector<int> lineitem_cols_;
-  ThreadIndexer thread_indexer_;
 
   std::atomic<size_t> orders_batches_generated_ = {0};
   std::atomic<size_t> lineitem_batches_generated_ = {0};
@@ -2516,11 +2510,11 @@ class SupplierGenerator : public TpchTableGenerator {
     int64_t batches_to_generate = (rows_to_generate_ + batch_size_ - 1) / batch_size_;
     int64_t batches_outputted_before_this_one = batches_outputted_.fetch_add(1);
     bool is_last_batch = batches_outputted_before_this_one == (batches_to_generate - 1);
-    output_callback_(std::move(eb));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(eb)));
     if (is_last_batch) {
       bool expected = false;
       if (done_.compare_exchange_strong(expected, true))
-        finished_callback_(batches_outputted_.load());
+        return finished_callback_(thread_index, batches_outputted_.load());
       return Status::OK();
     }
     return schedule_callback_(
@@ -2715,22 +2709,22 @@ class PartGenerator : public TpchTableGenerator {
   std::shared_ptr<Schema> schema() const override { return schema_; }
 
  private:
-  Status ProduceCallback(size_t) {
+  Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
-    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextPartBatch());
+    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextPartBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->part_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(thread_index, batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -2776,23 +2770,23 @@ class PartSuppGenerator : public TpchTableGenerator {
   std::shared_ptr<Schema> schema() const override { return schema_; }
 
  private:
-  Status ProduceCallback(size_t) {
+  Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
     ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch,
-                          gen_->NextPartSuppBatch());
+                          gen_->NextPartSuppBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->partsupp_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(thread_index, batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -2899,11 +2893,11 @@ class CustomerGenerator : public TpchTableGenerator {
     int64_t batches_to_generate = (rows_to_generate_ + batch_size_ - 1) / batch_size_;
     int64_t batches_generated_before_this_one = batches_outputted_.fetch_add(1);
     bool is_last_batch = batches_generated_before_this_one == (batches_to_generate - 1);
-    output_callback_(std::move(eb));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(eb)));
     if (is_last_batch) {
       bool expected = false;
       if (done_.compare_exchange_strong(expected, true))
-        finished_callback_(batches_outputted_.load());
+        return finished_callback_(thread_index, batches_outputted_.load());
       return Status::OK();
     }
     return schedule_callback_(
@@ -3095,22 +3089,22 @@ class OrdersGenerator : public TpchTableGenerator {
   std::shared_ptr<Schema> schema() const override { return schema_; }
 
  private:
-  Status ProduceCallback(size_t) {
+  Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
-    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextOrdersBatch());
+    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextOrdersBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->orders_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(thread_index, batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -3156,16 +3150,16 @@ class LineitemGenerator : public TpchTableGenerator {
   std::shared_ptr<Schema> schema() const override { return schema_; }
 
  private:
-  Status ProduceCallback(size_t) {
+  Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
     ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch,
-                          gen_->NextLineItemBatch());
+                          gen_->NextLineItemBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->lineitem_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(thread_index, batches_outputted_.load());
         return Status::OK();
       }
       // We may have generated but not outputted all of the batches.
@@ -3173,7 +3167,7 @@ class LineitemGenerator : public TpchTableGenerator {
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(thread_index, std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -3228,8 +3222,8 @@ class NationGenerator : public TpchTableGenerator {
     std::vector<Datum> result;
     for (const int& col : column_indices_) result.push_back(fields[col]);
     ARROW_ASSIGN_OR_RAISE(ExecBatch batch, ExecBatch::Make(std::move(result)));
-    output_callback(std::move(batch));
-    finished_callback(static_cast<int64_t>(1));
+    RETURN_NOT_OK(output_callback(/*thread_index=*/0, std::move(batch)));
+    RETURN_NOT_OK(finished_callback(/*thread_index=*/0, static_cast<int64_t>(1)));
     return Status::OK();
   }
 
@@ -3317,8 +3311,8 @@ class RegionGenerator : public TpchTableGenerator {
     std::vector<Datum> result;
     for (const int& col : column_indices_) result.push_back(fields[col]);
     ARROW_ASSIGN_OR_RAISE(ExecBatch batch, ExecBatch::Make(std::move(result)));
-    output_callback(std::move(batch));
-    finished_callback(static_cast<int64_t>(1));
+    RETURN_NOT_OK(output_callback(/*thread_index=*/0, std::move(batch)));
+    RETURN_NOT_OK(finished_callback(/*thread_index=*/0, static_cast<int64_t>(1)));
     return Status::OK();
   }
 
@@ -3360,11 +3354,11 @@ class RegionGenerator : public TpchTableGenerator {
 constexpr int32_t RegionGenerator::kRegionKey[RegionGenerator::kRowCount];
 constexpr const char* RegionGenerator::kRegionNames[RegionGenerator::kRowCount];
 
-class TpchNode : public ExecNode {
+class TpchNode : public SourceNode {
  public:
   TpchNode(ExecPlan* plan, const char* name,
            std::unique_ptr<TpchTableGenerator> generator)
-      : ExecNode(plan, {}, {}, generator->schema()),
+      : SourceNode(plan, generator->schema()),
         name_(name),
         generator_(std::move(generator)) {}
 
@@ -3374,19 +3368,19 @@ class TpchNode : public ExecNode {
     Unreachable("TPC-H node should never have any inputs");
   }
 
-  [[noreturn]] void InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
+  [[noreturn]] Status InputReceived(size_t, ExecNode*, ExecBatch) override { NoInputs(); }
+  [[noreturn]] Status InputFinished(size_t, ExecNode*, int) override { NoInputs(); }
 
-  [[noreturn]] void ErrorReceived(ExecNode*, Status) override { NoInputs(); }
-
-  [[noreturn]] void InputFinished(ExecNode*, int) override { NoInputs(); }
+  Status Init() override { return Status::OK(); }
 
   Status StartProducing() override {
     return generator_->StartProducing(
-        thread_indexer_.Capacity(),
-        [this](ExecBatch batch) { this->OutputBatchCallback(std::move(batch)); },
-        [this](int64_t num_batches) { this->FinishedCallback(num_batches); },
-        [this](std::function<Status(size_t)> func) -> Status {
-          return this->ScheduleTaskCallback(std::move(func));
+        plan_->num_threads(),
+        [this](size_t thread_index, ExecBatch batch) { return this->OutputBatchCallback(thread_index, std::move(batch)); },
+        [this](size_t thread_index, int64_t num_batches) { return this->FinishedCallback(thread_index, num_batches); },
+        [this](std::function<Status(size_t)> func) -> Status
+        {
+            return this->ScheduleTaskCallback(std::move(func));
         });
   }
 
@@ -3397,55 +3391,27 @@ class TpchNode : public ExecNode {
     // TODO(ARROW-16087)
   }
 
-  void StopProducing() override {
-    if (generator_->Abort()) std::ignore = task_group_.End();
+  void Abort() override {
+      generator_->Abort();
   }
-
-  Future<> finished() override { return task_group_.OnFinished(); }
 
  private:
-  void OutputBatchCallback(ExecBatch batch) {
-    output_->InputReceived(this, std::move(batch));
+  Status OutputBatchCallback(size_t thread_index, ExecBatch batch) {
+    return output_->InputReceived(thread_index, this, std::move(batch));
   }
 
-  void FinishedCallback(int64_t total_num_batches) {
-    output_->InputFinished(this, static_cast<int>(total_num_batches));
-    std::ignore = task_group_.End();
+  Status FinishedCallback(size_t thread_index, int64_t total_num_batches) {
+    return output_->InputFinished(thread_index, this, static_cast<int>(total_num_batches));
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
-    auto executor = plan_->exec_context()->executor();
-
-    // Due to the way that the generators schedule tasks, there may be more tasks
-    // than output batches. After outputting the last batch, the generator will
-    // end the task group, but there may still be other threads that try to schedule
-    // tasks while the task group is being ended. This can result in adding tasks after
-    // the task group is ended. If those tasks were to be executed, correctness would
-    // not be affected as they'd see the generator is done and exit immediately. As such,
-    // if the task group is ended we can just skip scheduling these tasks in general.
-    if (executor) {
-      RETURN_NOT_OK(task_group_.AddTaskIfNotEnded([&] {
-        return executor->Submit([this, func] {
-          size_t thread_index = thread_indexer_();
-          Status status = func(thread_index);
-          if (!status.ok()) {
-            StopProducing();
-            ErrorIfNotOk(status);
-            return;
-          }
-        });
-      }));
-    } else {
-      return func(0);
-    }
-    return Status::OK();
+    return plan_->ScheduleTask(pause_toggle, std::move(func));
   }
 
   const char* name_;
   std::unique_ptr<TpchTableGenerator> generator_;
 
-  util::AsyncTaskGroup task_group_;
-  ThreadIndexer thread_indexer_;
+  std::atomic<bool> pause_toggle{false};
 };
 
 class TpchGenImpl : public TpchGen {

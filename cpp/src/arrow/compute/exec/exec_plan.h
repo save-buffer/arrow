@@ -38,6 +38,9 @@ namespace arrow {
 
 namespace compute {
 
+class SourceNode;
+class SinkNode;
+
 class ARROW_EXPORT ExecPlan : public std::enable_shared_from_this<ExecPlan> {
  public:
   using NodeVector = std::vector<ExecNode*>;
@@ -52,34 +55,43 @@ class ARROW_EXPORT ExecPlan : public std::enable_shared_from_this<ExecPlan> {
       std::shared_ptr<const KeyValueMetadata> metadata = NULLPTR);
 
   ExecNode* AddNode(std::unique_ptr<ExecNode> node);
+  ExecNode* AddSourceNode(std::unique_ptr<ExecNode> node);
+  ExecNode* AddSinkNode(std::unique_ptr<ExecNode> node);
 
   template <typename Node, typename... Args>
   Node* EmplaceNode(Args&&... args) {
     std::unique_ptr<Node> node{new Node{std::forward<Args>(args)...}};
     auto out = node.get();
-    AddNode(std::move(node));
+    if(std::is_base_of<SourceNode, Node>::value)
+        AddSourceNode(std::move(node));
+    else if(std::is_base_of<SinkNode, Node>::value)
+        AddSinkNode(std::move(node));
+    else
+        AddNode(std::move(node));
     return out;
   }
 
+  Status StartProducing();
+
   /// The initial inputs
-  const NodeVector& sources() const;
+  const std::vector<SourceNode*>& sources() const;
 
   /// The final outputs
-  const NodeVector& sinks() const;
+  const std::vector<SinkNode*>& sinks() const;
 
   Status Validate();
 
-  /// \brief Start producing on all nodes
-  ///
-  /// Nodes are started in reverse topological order, such that any node
-  /// is started before all of its inputs.
-  Status StartProducing();
+  /// \brief Stop execution of the ExecPlan and clean up
+  void Abort();
 
-  /// \brief Stop producing on all nodes
-  ///
-  /// Nodes are stopped in topological order, such that any node
-  /// is stopped before all of its outputs.
-  void StopProducing();
+  size_t num_threads() const;
+  size_t GetThreadIndex();
+
+  Status AddFuture(Future<> fut);
+  Status ScheduleTask(const std::atomic<bool> &pause_toggle, std::function<Status(size_t)> fn);
+
+  using TaskGroupTask = std::function<Status(size_t, int64_t)>;
+  using TaskGroupContinuation = std::function<Status(size_t)>;
 
   /// \brief A future which will be marked finished when all nodes have stopped producing.
   Future<> finished();
@@ -108,9 +120,6 @@ class ARROW_EXPORT ExecNode {
   // The number of inputs/outputs expected by this node
   int num_inputs() const { return static_cast<int>(inputs_.size()); }
 
-  // Returns whether this node is a sink node
-  bool is_sink() const { return is_sink_; }
-
   /// This node's predecessors in the exec plan
   const NodeVector& inputs() const { return inputs_; }
 
@@ -132,7 +141,7 @@ class ARROW_EXPORT ExecNode {
   const std::string& label() const { return label_; }
   void SetLabel(std::string label) { label_ = std::move(label); }
 
-  Status Validate() const;
+  virtual Status Validate() const;
 
   /// Upstream API:
   /// These functions are called by input nodes that want to inform this node
@@ -147,17 +156,14 @@ class ARROW_EXPORT ExecNode {
   ///   and StopProducing()
 
   /// Transfer input batch to ExecNode
-  virtual void InputReceived(ExecNode* input, ExecBatch batch) = 0;
-
-  /// Signal error to ExecNode
-  virtual void ErrorReceived(ExecNode* input, Status error) = 0;
+  virtual Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) = 0;
 
   /// Mark the inputs finished after the given number of batches.
   ///
   /// This may be called before all inputs are received.  This simply fixes
   /// the total number of incoming batches for an input, so that the ExecNode
   /// knows when it has received all input, regardless of order.
-  virtual void InputFinished(ExecNode* input, int total_batches) = 0;
+  virtual Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) = 0;
 
   /// Lifecycle API:
   /// - start / stop to initiate and terminate production
@@ -214,13 +220,7 @@ class ARROW_EXPORT ExecNode {
   // A node with multiple outputs will also need to ensure it is applying backpressure if
   // any of its outputs is asking to pause
 
-  /// \brief Start producing
-  ///
-  /// This must only be called once.  If this fails, then other lifecycle
-  /// methods must not be called.
-  ///
-  /// This is typically called automatically by ExecPlan::StartProducing().
-  virtual Status StartProducing() = 0;
+  virtual Status Init() { return Status::OK(); }
 
   /// \brief Pause producing temporarily
   ///
@@ -243,20 +243,22 @@ class ARROW_EXPORT ExecNode {
   /// This may be called any number of times after StartProducing() succeeds.
   virtual void ResumeProducing(int32_t counter) = 0;
 
-  /// \brief Stop producing definitively to a single output
+  /// \brief Perform any cleanup in the event of an unexpected shutdown.
   ///
-  /// This call is a hint that an output node has completed and is not willing
-  /// to receive any further data.
-  virtual void StopProducing() = 0;
+  /// This call assumes that there are no other tasks in flight that would touch
+  /// the node's internal state.
+  virtual void Abort() {}
 
   /// \brief A future which will be marked finished when this node has stopped producing.
-  virtual Future<> finished() = 0;
+  ///
+  /// Only relevant to sink nodes.
+  virtual Future<> finished() { return finished_; }
 
   std::string ToString(int indent = 0) const;
 
  protected:
   ExecNode(ExecPlan* plan, NodeVector inputs, std::vector<std::string> input_labels,
-           std::shared_ptr<Schema> output_schema, bool is_sink = false);
+           std::shared_ptr<Schema> output_schema);
 
   // A helper method to send an error status to all outputs.
   // Returns true if the status was an error.
@@ -272,13 +274,51 @@ class ARROW_EXPORT ExecNode {
   std::vector<std::string> input_labels_;
 
   std::shared_ptr<Schema> output_schema_;
-  bool is_sink_;
   ExecNode *output_;
 
-  // Future to sync finished
   Future<> finished_ = Future<>::MakeFinished();
 
   util::tracing::Span span_;
+};
+
+class SourceNode : public ExecNode
+{
+public:
+    virtual Status StartProducing() = 0;
+    [[noreturn]] Status InputReceived(size_t, ExecNode*, ExecBatch) override { NoInputs(); }
+    [[noreturn]] Status InputFinished(size_t, ExecNode*, int) override { NoInputs(); }
+    Status Validate() const override;
+
+private:
+    [[noreturn]] static void NoInputs();
+
+protected:
+    SourceNode(ExecPlan *plan, std::shared_ptr<Schema> output_schema)
+        : ExecNode(plan, {}, {}, std::move(output_schema)) {}
+};
+
+class SinkNode : public ExecNode
+{
+public:
+  [[noreturn]] void ResumeProducing(int32_t counter) override { NoOutputs(); }
+  [[noreturn]] void PauseProducing(int32_t counter) override { NoOutputs(); }
+  Status Validate() const override;
+
+private:
+    [[noreturn]] static void NoOutputs();
+
+protected:
+    SinkNode(ExecPlan *plan, ExecNode *input)
+        : ExecNode(plan, { input }, {}, {})
+    {
+        finished_ = Future<>::Make();
+    }
+
+    SinkNode(ExecPlan *plan, ExecNode *input, std::string label)
+        : ExecNode(plan, { input }, { std::move(label) }, {})
+    {
+        finished_ = Future<>::Make();
+    }
 };
 
 /// \brief MapNode is an ExecNode type class which process a task like filter/project
@@ -292,24 +332,20 @@ class ARROW_EXPORT ExecNode {
 class MapNode : public ExecNode {
  public:
   MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-          std::shared_ptr<Schema> output_schema, bool async_mode);
+          std::shared_ptr<Schema> output_schema);
 
-  void ErrorReceived(ExecNode* input, Status error) override;
-
-  void InputFinished(ExecNode* input, int total_batches) override;
-
-  Status StartProducing() override;
+  Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override;
 
   void PauseProducing(int32_t counter) override;
 
   void ResumeProducing(int32_t counter) override;
 
-  void StopProducing() override;
+  void Abort() override;
 
   Future<> finished() override;
 
  protected:
-  void SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn, ExecBatch batch);
+  Status DoMap(size_t thread_index, std::function<Result<ExecBatch>(ExecBatch)> map_fn, ExecBatch batch);
 
   void Finish(Status finish_st = Status::OK());
 

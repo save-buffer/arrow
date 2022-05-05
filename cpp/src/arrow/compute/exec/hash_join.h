@@ -98,11 +98,11 @@ class ARROW_EXPORT HashJoinSchema {
 
 class HashJoinImpl {
  public:
-  using OutputBatchCallback = std::function<void(ExecBatch)>;
-  using FinishedCallback = std::function<void(int64_t)>;
+  using OutputBatchCallback = std::function<Status(size_t, ExecBatch)>;
+  using FinishedCallback = std::function<Status(size_t, int64_t)>;
 
   virtual ~HashJoinImpl() = default;
-  virtual Status Init(ExecContext* ctx, JoinType join_type, bool use_sync_execution,
+  virtual Status Init(ExecContext* ctx, JoinType join_type,
                       size_t num_threads, HashJoinSchema* schema_mgr,
                       std::vector<JoinKeyCmp> key_cmp, Expression filter,
                       OutputBatchCallback output_batch_callback,

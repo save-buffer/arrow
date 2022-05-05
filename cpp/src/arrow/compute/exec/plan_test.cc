@@ -57,21 +57,14 @@ TEST(ExecPlanConstruction, Empty) {
 
 TEST(ExecPlanConstruction, SingleNode) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-  auto node = MakeDummyNode(plan.get(), "dummy", /*inputs=*/{}, /*is_sink=*/true);
-  ASSERT_OK(plan->Validate());
-  ASSERT_THAT(plan->sources(), ElementsAre(node));
-  ASSERT_THAT(plan->sinks(), ElementsAre(node));
-
-  ASSERT_OK_AND_ASSIGN(plan, ExecPlan::Make());
-  node = MakeDummyNode(plan.get(), "dummy", /*inputs=*/{}, /*is_sink=*/false);
-  // Output not bound
+  MakeDummyNode(plan.get(), "dummy", /*inputs=*/{});
   ASSERT_THAT(plan->Validate(), Raises(StatusCode::Invalid));
 }
 
 TEST(ExecPlanConstruction, SourceSink) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-  auto source = MakeDummyNode(plan.get(), "source", /*inputs=*/{}, /*is_sink=*/false);
-  auto sink = MakeDummyNode(plan.get(), "sink", /*inputs=*/{source}, /*is_sink=*/true);
+  auto source = MakeDummySourceNode(plan.get(), "source");
+  auto sink = MakeDummySinkNode(plan.get(), "sink", /*input=*/source);
 
   ASSERT_OK(plan->Validate());
   EXPECT_THAT(plan->sources(), ElementsAre(source));
@@ -81,21 +74,19 @@ TEST(ExecPlanConstruction, SourceSink) {
 TEST(ExecPlanConstruction, MultipleNode) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
 
-  auto source1 = MakeDummyNode(plan.get(), "source1", /*inputs=*/{}, /*is_sink=*/false);
+  auto source1 = MakeDummySourceNode(plan.get(), "source1");
 
-  auto source2 = MakeDummyNode(plan.get(), "source2", /*inputs=*/{}, /*is_sink=*/false);
+  auto source2 = MakeDummySourceNode(plan.get(), "source2");
 
   auto process1 =
-      MakeDummyNode(plan.get(), "process1", /*inputs=*/{source1}, /*is_sink=*/false);
+      MakeDummyNode(plan.get(), "process1", /*inputs=*/{source1});
 
-  auto process2 = MakeDummyNode(plan.get(), "process1", /*inputs=*/{source2},
-                                /*is_sink=*/false);
+  auto process2 = MakeDummyNode(plan.get(), "process1", /*inputs=*/{source2});
 
   auto process3 =
-      MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, process2, process1},
-                    /*is_sink=*/false);
+      MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, process2, process1});
 
-  auto sink = MakeDummyNode(plan.get(), "sink", /*inputs=*/{process3}, /*is_sink=*/true);
+  auto sink = MakeDummySinkNode(plan.get(), "sink", /*input=*/process3);
 
   ASSERT_OK(plan->Validate());
   ASSERT_THAT(plan->sources(), ElementsAre(source1, source2));
@@ -104,10 +95,10 @@ TEST(ExecPlanConstruction, MultipleNode) {
 
 TEST(ExecPlanConstruction, AutoLabel) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-  auto source1 = MakeDummyNode(plan.get(), "", /*inputs=*/{}, /*is_sink=*/false);
+  auto source1 = MakeDummySourceNode(plan.get(), "");
   auto source2 =
-      MakeDummyNode(plan.get(), "some_label", /*inputs=*/{}, /*is_sink=*/false);
-  auto source3 = MakeDummyNode(plan.get(), "", /*inputs=*/{}, /*is_sink=*/false);
+      MakeDummySourceNode(plan.get(), "some_label");
+  auto source3 = MakeDummySourceNode(plan.get(), "");
 
   ASSERT_EQ("0", source1->label());
   ASSERT_EQ("some_label", source2->label());
@@ -124,7 +115,7 @@ struct StartStopTracker {
     };
   }
 
-  StopProducingFunc stop_producing_func() {
+  AbortFunc abort_func() {
     return [this](ExecNode* node) { stopped.push_back(node->label()); };
   }
 };
@@ -134,41 +125,34 @@ TEST(ExecPlan, DummyStartProducing) {
 
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
 
-  auto source1 = MakeDummyNode(plan.get(), "source1", /*inputs=*/{}, /*is_sink=*/false,
-                               t.start_producing_func(), t.stop_producing_func());
+  auto source1 = MakeDummySourceNode(plan.get(), "source1",
+                               t.start_producing_func(), t.abort_func());
 
-  auto source2 = MakeDummyNode(plan.get(), "source2", /*inputs=*/{}, /*is_sink=*/false,
-                               t.start_producing_func(), t.stop_producing_func());
+  auto source2 = MakeDummySourceNode(plan.get(), "source2",
+                               t.start_producing_func(), t.abort_func());
 
   auto process1 =
-      MakeDummyNode(plan.get(), "process1", /*inputs=*/{source1}, /*is_sink=*/false,
-                    t.start_producing_func(), t.stop_producing_func());
+      MakeDummyNode(plan.get(), "process1", /*inputs=*/{source1}, t.abort_func());
 
   auto process2 =
-      MakeDummyNode(plan.get(), "process2", /*inputs=*/{source2},
-                    /*is_sink=*/false, t.start_producing_func(), t.stop_producing_func());
+      MakeDummyNode(plan.get(), "process2", /*inputs=*/{source2}, t.abort_func());
 
   auto process3 =
-      MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, process2},
-                    /*is_sink=*/false, t.start_producing_func(), t.stop_producing_func());
+      MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, process2}, t.abort_func());
 
-  MakeDummyNode(plan.get(), "sink", /*inputs=*/{process3}, /*is_sink=*/true,
-                t.start_producing_func(), t.stop_producing_func());
+  MakeDummySinkNode(plan.get(), "sink", /*inputs=*/process3, t.abort_func());
 
   ASSERT_OK(plan->Validate());
   ASSERT_EQ(t.started.size(), 0);
   ASSERT_EQ(t.stopped.size(), 0);
 
   ASSERT_OK(plan->StartProducing());
-  // Note that any correct reverse topological order may do
-  ASSERT_THAT(t.started, ElementsAre("sink", "process3", "process2", "process1",
-                                     "source2", "source1"));
+  // Note that any order of source nodes is fine
+  ASSERT_THAT(t.started, ElementsAre("source1", "source2"));
 
-  plan->StopProducing();
+  plan->Abort();
   ASSERT_THAT(plan->finished(), Finishes(Ok()));
-  // Note that any correct topological order may do
-  ASSERT_THAT(t.stopped, ElementsAre("source1", "process1", "source2", "process2",
-                                     "process3", "sink"));
+  ASSERT_THAT(t.stopped, ElementsAre("source1", "source2", "process1", "process2", "process3", "sink"));
 
   ASSERT_THAT(plan->StartProducing(),
               Raises(StatusCode::Invalid, HasSubstr("restarted")));
@@ -178,38 +162,32 @@ TEST(ExecPlan, DummyStartProducingError) {
   StartStopTracker t;
 
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
-  auto source1 = MakeDummyNode(
-      plan.get(), "source1", /*num_inputs=*/{}, /*is_sink=*/false,
-      t.start_producing_func(Status::NotImplemented("zzz")), t.stop_producing_func());
+  auto source1 = MakeDummySourceNode(
+      plan.get(), "source1", t.start_producing_func(Status::NotImplemented("zzz")), t.abort_func());
 
   auto source2 =
-      MakeDummyNode(plan.get(), "source2", /*num_inputs=*/{}, /*is_sink=*/false,
-                    t.start_producing_func(), t.stop_producing_func());
+      MakeDummySourceNode(plan.get(), "source2",
+                          t.start_producing_func(), t.abort_func());
 
   auto process1 = MakeDummyNode(
-      plan.get(), "process1", /*num_inputs=*/{source1}, /*is_sink=*/false,
-      t.start_producing_func(Status::IOError("xxx")), t.stop_producing_func());
+      plan.get(), "process1", /*inputs=*/{source1}, t.abort_func());
 
   auto process2 =
-      MakeDummyNode(plan.get(), "process2", /*num_inputs=*/{source2},
-                    /*is_sink=*/false, t.start_producing_func(), t.stop_producing_func());
+      MakeDummyNode(plan.get(), "process2", /*inputs=*/{source2}, t.abort_func());
 
   auto process3 =
-      MakeDummyNode(plan.get(), "process3", /*num_inputs=*/{process1, process2},
-                    /*is_sink=*/false, t.start_producing_func(), t.stop_producing_func());
+      MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, process2}, t.abort_func());
 
-  MakeDummyNode(plan.get(), "sink", /*num_inputs=*/{process3}, /*is_sink=*/true,
-                t.start_producing_func(), t.stop_producing_func());
+  MakeDummySinkNode(plan.get(), "sink", /*inputs=*/process3, t.abort_func());
 
   ASSERT_OK(plan->Validate());
   ASSERT_EQ(t.started.size(), 0);
   ASSERT_EQ(t.stopped.size(), 0);
 
   // `process1` raises IOError
-  ASSERT_THAT(plan->StartProducing(), Raises(StatusCode::IOError));
-  ASSERT_THAT(t.started, ElementsAre("sink", "process3", "process2", "process1"));
-  // Nodes that started successfully were stopped in reverse order
-  ASSERT_THAT(t.stopped, ElementsAre("process2", "process3", "sink"));
+  ASSERT_THAT(plan->StartProducing(), Raises(StatusCode::NotImplemented));
+  ASSERT_THAT(t.started, ElementsAre("source1"));
+  ASSERT_THAT(t.stopped, ElementsAre("process1", "process2", "process3", "sink"));
 }
 
 TEST(ExecPlanExecution, SourceSink) {
@@ -226,9 +204,9 @@ TEST(ExecPlanExecution, SourceSink) {
 
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{basic_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                      basic_data.gen(parallel, slow)}},
-                        {"sink", SinkNodeOptions{&sink_gen}},
+                        {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                     })
                     .AddToPlan(plan.get()));
 
@@ -245,10 +223,10 @@ TEST(ExecPlanExecution, UseSinkAfterExecution) {
     auto basic_data = MakeBasicBatches();
     ASSERT_OK(Declaration::Sequence(
                   {
-                      {"source", SourceNodeOptions{basic_data.schema,
+                      {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                    basic_data.gen(/*parallel=*/false,
                                                                   /*slow=*/false)}},
-                      {"sink", SinkNodeOptions{&sink_gen}},
+                      {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                   })
                   .AddToPlan(plan.get()));
     ASSERT_OK(plan->StartProducing());
@@ -269,7 +247,7 @@ TEST(ExecPlanExecution, TableSourceSink) {
     ASSERT_OK(Declaration::Sequence(
                   {
                       {"table_source", TableSourceNodeOptions{table, batch_size}},
-                      {"sink", SinkNodeOptions{&sink_gen}},
+                      {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                   })
                   .AddToPlan(plan.get()));
 
@@ -314,8 +292,8 @@ TEST(ExecPlanExecution, SinkNodeBackpressure) {
   std::shared_ptr<Schema> schema_ = schema({field("data", uint32())});
   ARROW_EXPECT_OK(compute::Declaration::Sequence(
                       {
-                          {"source", SourceNodeOptions(schema_, batch_producer)},
-                          {"sink", SinkNodeOptions{&sink_gen, backpressure_options,
+                          {"asyncgen_source", SourceNodeOptions(schema_, batch_producer)},
+                          {"asyncgen_sink", SinkNodeOptions{&sink_gen, backpressure_options,
                                                    &backpressure_monitor}},
                       })
                       .AddToPlan(plan.get()));
@@ -350,7 +328,7 @@ TEST(ExecPlanExecution, SinkNodeBackpressure) {
 
   // Cleanup
   batch_producer.producer().Push(IterationEnd<util::optional<ExecBatch>>());
-  plan->StopProducing();
+  plan->Abort();
   ASSERT_FINISHES_OK(plan->finished());
 }
 
@@ -361,17 +339,17 @@ TEST(ExecPlan, ToString) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{basic_data.schema,
+                    {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                  basic_data.gen(/*parallel=*/false,
                                                                 /*slow=*/false)}},
-                    {"sink", SinkNodeOptions{&sink_gen}},
+                    {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                 })
                 .AddToPlan(plan.get()));
-  EXPECT_EQ(plan->sources()[0]->ToString(), R"(:SourceNode{})");
-  EXPECT_EQ(plan->sinks()[0]->ToString(), R"(:SinkNode{})");
+  EXPECT_EQ(plan->sources()[0]->ToString(), R"(:AsyncGenSourceNode{})");
+  EXPECT_EQ(plan->sinks()[0]->ToString(), R"(:AsyncGenSinkNode{})");
   EXPECT_EQ(plan->ToString(), R"(ExecPlan with 2 nodes:
-:SinkNode{}
-  :SourceNode{}
+:AsyncGenSinkNode{}
+  :AsyncGenSourceNode{}
 )");
 
   ASSERT_OK_AND_ASSIGN(plan, ExecPlan::Make());
@@ -379,7 +357,7 @@ TEST(ExecPlan, ToString) {
   ASSERT_OK(
       Declaration::Sequence(
           {
-              {"source",
+              {"asyncgen_source",
                SourceNodeOptions{basic_data.schema,
                                  basic_data.gen(/*parallel=*/false, /*slow=*/false)},
                "custom_source_label"},
@@ -412,17 +390,17 @@ custom_sink_label:OrderBySinkNode{by={sort_keys=[FieldRef.Name(sum(multiply(i32,
     ]}
       :ProjectNode{projection=[bool, multiply(i32, 2)]}
         :FilterNode{filter=(i32 >= 0)}
-          custom_source_label:SourceNode{}
+          custom_source_label:AsyncGenSourceNode{}
 )a");
 
   ASSERT_OK_AND_ASSIGN(plan, ExecPlan::Make());
 
   Declaration union_node{"union", ExecNodeOptions{}};
-  Declaration lhs{"source",
+  Declaration lhs{"asyncgen_source",
                   SourceNodeOptions{basic_data.schema,
                                     basic_data.gen(/*parallel=*/false, /*slow=*/false)}};
   lhs.label = "lhs";
-  Declaration rhs{"source",
+  Declaration rhs{"asyncgen_source",
                   SourceNodeOptions{basic_data.schema,
                                     basic_data.gen(/*parallel=*/false, /*slow=*/false)}};
   rhs.label = "rhs";
@@ -436,17 +414,17 @@ custom_sink_label:OrderBySinkNode{by={sort_keys=[FieldRef.Name(sum(multiply(i32,
                                                  /*targets=*/{"i32"},
                                                  /*names=*/{"count(i32)"},
                                                  /*keys=*/{}}},
-              {"sink", SinkNodeOptions{&sink_gen}},
+              {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
           })
           .AddToPlan(plan.get()));
   EXPECT_EQ(plan->ToString(), R"a(ExecPlan with 5 nodes:
-:SinkNode{}
+:AsyncGenSinkNode{}
   :ScalarAggregateNode{aggregates=[
 	count(i32, {mode=NON_NULL}),
 ]}
     :UnionNode{}
-      rhs:SourceNode{}
-      lhs:SourceNode{}
+      rhs:AsyncGenSourceNode{}
+      lhs:AsyncGenSourceNode{}
 )a");
 }
 
@@ -468,7 +446,7 @@ TEST(ExecPlanExecution, SourceOrderBy) {
       SortOptions options({SortKey("i32", SortOrder::Ascending)});
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{basic_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                      basic_data.gen(parallel, slow)}},
                         {"order_by_sink", OrderBySinkNodeOptions{options, &sink_gen}},
                     })
@@ -496,8 +474,8 @@ TEST(ExecPlanExecution, SourceSinkError) {
 
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{basic_data.schema, error_source_gen}},
-                    {"sink", SinkNodeOptions{&sink_gen}},
+                    {"asyncgen_source", SourceNodeOptions{basic_data.schema, error_source_gen}},
+                    {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                 })
                 .AddToPlan(plan.get()));
 
@@ -538,14 +516,13 @@ TEST(ExecPlanExecution, SourceConsumingSink) {
 
       auto basic_data = MakeBasicBatches();
       ASSERT_OK_AND_ASSIGN(
-          auto source, MakeExecNode("source", plan.get(), {},
+          auto source, MakeExecNode("asyncgen_source", plan.get(), {},
                                     SourceNodeOptions(basic_data.schema,
                                                       basic_data.gen(parallel, slow))));
       ASSERT_OK(MakeExecNode("consuming_sink", plan.get(), {source},
                              ConsumingSinkNodeOptions(consumer)));
       ASSERT_OK(plan->StartProducing());
       // Source should finish fairly quickly
-      ASSERT_FINISHES_OK(source->finished());
       SleepABit();
       ASSERT_EQ(2, batches_seen);
       // Consumer isn't finished and so plan shouldn't have finished
@@ -572,7 +549,7 @@ TEST(ExecPlanExecution, SourceTableConsumingSink) {
       TableSinkNodeOptions options{&out};
 
       ASSERT_OK_AND_ASSIGN(
-          auto source, MakeExecNode("source", plan.get(), {},
+          auto source, MakeExecNode("asyncgen_source", plan.get(), {},
                                     SourceNodeOptions(basic_data.schema,
                                                       basic_data.gen(parallel, slow))));
       ASSERT_OK(MakeExecNode("table_sink", plan.get(), {source}, options));
@@ -622,13 +599,13 @@ TEST(ExecPlanExecution, ConsumingSinkError) {
     ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
     auto basic_data = MakeBasicBatches();
     ASSERT_OK(Declaration::Sequence(
-                  {{"source",
+                  {{"asyncgen_source",
                     SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))},
                    {"consuming_sink", ConsumingSinkNodeOptions(consumer)}})
                   .AddToPlan(plan.get()));
     ASSERT_OK_AND_ASSIGN(
         auto source,
-        MakeExecNode("source", plan.get(), {},
+        MakeExecNode("asyncgen_source", plan.get(), {},
                      SourceNodeOptions(basic_data.schema, basic_data.gen(false, false))));
     ASSERT_OK(MakeExecNode("consuming_sink", plan.get(), {source},
                            ConsumingSinkNodeOptions(consumer)));
@@ -660,9 +637,9 @@ TEST(ExecPlanExecution, StressSourceSink) {
 
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{random_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{random_data.schema,
                                                      random_data.gen(parallel, slow)}},
-                        {"sink", SinkNodeOptions{&sink_gen}},
+                        {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                     })
                     .AddToPlan(plan.get()));
 
@@ -690,7 +667,7 @@ TEST(ExecPlanExecution, StressSourceOrderBy) {
       SortOptions options({SortKey("a", SortOrder::Ascending)});
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{random_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{random_data.schema,
                                                      random_data.gen(parallel, slow)}},
                         {"order_by_sink", OrderBySinkNodeOptions{options, &sink_gen}},
                     })
@@ -727,19 +704,19 @@ TEST(ExecPlanExecution, StressSourceGroupedSumStop) {
       SortOptions options({SortKey("a", SortOrder::Ascending)});
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{random_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{random_data.schema,
                                                      random_data.gen(parallel, slow)}},
                         {"aggregate",
                          AggregateNodeOptions{/*aggregates=*/{{"hash_sum", nullptr}},
                                               /*targets=*/{"a"}, /*names=*/{"sum(a)"},
                                               /*keys=*/{"b"}}},
-                        {"sink", SinkNodeOptions{&sink_gen}},
+                        {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                     })
                     .AddToPlan(plan.get()));
 
       ASSERT_OK(plan->Validate());
       ASSERT_OK(plan->StartProducing());
-      plan->StopProducing();
+      plan->Abort();
       ASSERT_FINISHES_OK(plan->finished());
     }
   }
@@ -762,9 +739,9 @@ TEST(ExecPlanExecution, StressSourceSinkStopped) {
 
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{random_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{random_data.schema,
                                                      random_data.gen(parallel, slow)}},
-                        {"sink", SinkNodeOptions{&sink_gen}},
+                        {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                     })
                     .AddToPlan(plan.get()));
 
@@ -773,7 +750,7 @@ TEST(ExecPlanExecution, StressSourceSinkStopped) {
 
       EXPECT_THAT(sink_gen(), Finishes(ResultWith(Optional(random_data.batches[0]))));
 
-      plan->StopProducing();
+      plan->Abort();
       ASSERT_THAT(plan->finished(), Finishes(Ok()));
     }
   }
@@ -787,11 +764,11 @@ TEST(ExecPlanExecution, SourceFilterSink) {
 
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{basic_data.schema,
+                    {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                  basic_data.gen(/*parallel=*/false,
                                                                 /*slow=*/false)}},
                     {"filter", FilterNodeOptions{equal(field_ref("i32"), literal(6))}},
-                    {"sink", SinkNodeOptions{&sink_gen}},
+                    {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                 })
                 .AddToPlan(plan.get()));
 
@@ -809,7 +786,7 @@ TEST(ExecPlanExecution, SourceProjectSink) {
 
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{basic_data.schema,
+                    {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                  basic_data.gen(/*parallel=*/false,
                                                                 /*slow=*/false)}},
                     {"project",
@@ -818,7 +795,7 @@ TEST(ExecPlanExecution, SourceProjectSink) {
                                             call("add", {field_ref("i32"), literal(1)}),
                                         },
                                         {"!bool", "i32 + 1"}}},
-                    {"sink", SinkNodeOptions{&sink_gen}},
+                    {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                 })
                 .AddToPlan(plan.get()));
 
@@ -875,13 +852,13 @@ TEST(ExecPlanExecution, SourceGroupedSum) {
 
     ASSERT_OK(Declaration::Sequence(
                   {
-                      {"source", SourceNodeOptions{input.schema,
+                      {"asyncgen_source", SourceNodeOptions{input.schema,
                                                    input.gen(parallel, /*slow=*/false)}},
                       {"aggregate",
                        AggregateNodeOptions{/*aggregates=*/{{"hash_sum", nullptr}},
                                             /*targets=*/{"i32"}, /*names=*/{"sum(i32)"},
                                             /*keys=*/{"str"}}},
-                      {"sink", SinkNodeOptions{&sink_gen}},
+                      {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                   })
                   .AddToPlan(plan.get()));
 
@@ -910,11 +887,11 @@ TEST(ExecPlanExecution, NestedSourceFilter) {
 
     ASSERT_OK(Declaration::Sequence(
                   {
-                      {"source", SourceNodeOptions{input.schema,
+                      {"asyncgen_source", SourceNodeOptions{input.schema,
                                                    input.gen(parallel, /*slow=*/false)}},
                       {"filter", FilterNodeOptions{greater_equal(
                                      field_ref(FieldRef("struct", "i32")), literal(5))}},
-                      {"sink", SinkNodeOptions{&sink_gen}},
+                      {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                   })
                   .AddToPlan(plan.get()));
 
@@ -940,7 +917,7 @@ TEST(ExecPlanExecution, NestedSourceProjectGroupedSum) {
     ASSERT_OK(
         Declaration::Sequence(
             {
-                {"source",
+                {"asyncgen_source",
                  SourceNodeOptions{input.schema, input.gen(parallel, /*slow=*/false)}},
                 {"project", ProjectNodeOptions{{
                                                    field_ref(FieldRef("struct", "i32")),
@@ -951,7 +928,7 @@ TEST(ExecPlanExecution, NestedSourceProjectGroupedSum) {
                                                    /*targets=*/{"i32"},
                                                    /*names=*/{"sum(i32)"},
                                                    /*keys=*/{"bool"}}},
-                {"sink", SinkNodeOptions{&sink_gen}},
+                {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
             })
             .AddToPlan(plan.get()));
 
@@ -973,7 +950,7 @@ TEST(ExecPlanExecution, SourceFilterProjectGroupedSumFilter) {
     ASSERT_OK(
         Declaration::Sequence(
             {
-                {"source",
+                {"asyncgen_source",
                  SourceNodeOptions{input.schema, input.gen(parallel, /*slow=*/false)}},
                 {"filter",
                  FilterNodeOptions{greater_equal(field_ref("i32"), literal(0))}},
@@ -987,7 +964,7 @@ TEST(ExecPlanExecution, SourceFilterProjectGroupedSumFilter) {
                                                    /*keys=*/{"str"}}},
                 {"filter", FilterNodeOptions{greater(field_ref("sum(multiply(i32, 2))"),
                                                      literal(10 * batch_multiplicity))}},
-                {"sink", SinkNodeOptions{&sink_gen}},
+                {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
             })
             .AddToPlan(plan.get()));
 
@@ -1012,7 +989,7 @@ TEST(ExecPlanExecution, SourceFilterProjectGroupedSumOrderBy) {
     ASSERT_OK(
         Declaration::Sequence(
             {
-                {"source",
+                {"asyncgen_source",
                  SourceNodeOptions{input.schema, input.gen(parallel, /*slow=*/false)}},
                 {"filter",
                  FilterNodeOptions{greater_equal(field_ref("i32"), literal(0))}},
@@ -1051,7 +1028,7 @@ TEST(ExecPlanExecution, SourceFilterProjectGroupedSumTopK) {
     ASSERT_OK(
         Declaration::Sequence(
             {
-                {"source",
+                {"asyncgen_source",
                  SourceNodeOptions{input.schema, input.gen(parallel, /*slow=*/false)}},
                 {"project", ProjectNodeOptions{{
                                 field_ref("str"),
@@ -1080,14 +1057,14 @@ TEST(ExecPlanExecution, SourceScalarAggSink) {
 
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{basic_data.schema,
+                    {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                  basic_data.gen(/*parallel=*/false,
                                                                 /*slow=*/false)}},
                     {"aggregate", AggregateNodeOptions{
                                       /*aggregates=*/{{"sum", nullptr}, {"any", nullptr}},
                                       /*targets=*/{"i32", "bool"},
                                       /*names=*/{"sum(i32)", "any(bool)"}}},
-                    {"sink", SinkNodeOptions{&sink_gen}},
+                    {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                 })
                 .AddToPlan(plan.get()));
 
@@ -1112,14 +1089,14 @@ TEST(ExecPlanExecution, AggregationPreservesOptions) {
       auto options = std::make_shared<TDigestOptions>(TDigestOptions::Defaults());
       ASSERT_OK(Declaration::Sequence(
                     {
-                        {"source", SourceNodeOptions{basic_data.schema,
+                        {"asyncgen_source", SourceNodeOptions{basic_data.schema,
                                                      basic_data.gen(/*parallel=*/false,
                                                                     /*slow=*/false)}},
                         {"aggregate",
                          AggregateNodeOptions{/*aggregates=*/{{"tdigest", options.get()}},
                                               /*targets=*/{"i32"},
                                               /*names=*/{"tdigest(i32)"}}},
-                        {"sink", SinkNodeOptions{&sink_gen}},
+                        {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                     })
                     .AddToPlan(plan.get()));
     }
@@ -1140,14 +1117,14 @@ TEST(ExecPlanExecution, AggregationPreservesOptions) {
       ASSERT_OK(
           Declaration::Sequence(
               {
-                  {"source", SourceNodeOptions{data.schema, data.gen(/*parallel=*/false,
+                  {"asyncgen_source", SourceNodeOptions{data.schema, data.gen(/*parallel=*/false,
                                                                      /*slow=*/false)}},
                   {"aggregate",
                    AggregateNodeOptions{/*aggregates=*/{{"hash_count", options.get()}},
                                         /*targets=*/{"i32"},
                                         /*names=*/{"count(i32)"},
                                         /*keys=*/{"str"}}},
-                  {"sink", SinkNodeOptions{&sink_gen}},
+                  {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
               })
               .AddToPlan(plan.get()));
     }
@@ -1178,7 +1155,7 @@ TEST(ExecPlanExecution, ScalarSourceScalarAggSink) {
   ASSERT_OK(
       Declaration::Sequence(
           {
-              {"source",
+              {"asyncgen_source",
                SourceNodeOptions{scalar_data.schema, scalar_data.gen(/*parallel=*/false,
                                                                      /*slow=*/false)}},
               {"aggregate", AggregateNodeOptions{
@@ -1195,7 +1172,7 @@ TEST(ExecPlanExecution, ScalarSourceScalarAggSink) {
                                 /*names=*/
                                 {"all(b)", "any(b)", "count(a)", "mean(a)", "product(a)",
                                  "stddev(a)", "sum(a)", "tdigest(a)", "variance(a)"}}},
-              {"sink", SinkNodeOptions{&sink_gen}},
+              {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
           })
           .AddToPlan(plan.get()));
 
@@ -1229,7 +1206,7 @@ TEST(ExecPlanExecution, ScalarSourceGroupedSum) {
   SortOptions options({SortKey("b", SortOrder::Descending)});
   ASSERT_OK(Declaration::Sequence(
                 {
-                    {"source", SourceNodeOptions{scalar_data.schema,
+                    {"asyncgen_source", SourceNodeOptions{scalar_data.schema,
                                                  scalar_data.gen(/*parallel=*/false,
                                                                  /*slow=*/false)}},
                     {"aggregate",
@@ -1262,7 +1239,7 @@ TEST(ExecPlanExecution, SelfInnerHashJoinSink) {
     ExecNode* right_source;
     for (auto source : {&left_source, &right_source}) {
       ASSERT_OK_AND_ASSIGN(
-          *source, MakeExecNode("source", plan.get(), {},
+          *source, MakeExecNode("asyncgen_source", plan.get(), {},
                                 SourceNodeOptions{input.schema,
                                                   input.gen(parallel, /*slow=*/false)}));
     }
@@ -1287,7 +1264,7 @@ TEST(ExecPlanExecution, SelfInnerHashJoinSink) {
         auto hashjoin,
         MakeExecNode("hashjoin", plan.get(), {left_filter, right_filter}, join_opts));
 
-    ASSERT_OK_AND_ASSIGN(std::ignore, MakeExecNode("sink", plan.get(), {hashjoin},
+    ASSERT_OK_AND_ASSIGN(std::ignore, MakeExecNode("asyncgen_sink", plan.get(), {hashjoin},
                                                    SinkNodeOptions{&sink_gen}));
 
     ASSERT_FINISHES_OK_AND_ASSIGN(auto result, StartAndCollect(plan.get(), sink_gen));
@@ -1319,7 +1296,7 @@ TEST(ExecPlanExecution, SelfOuterHashJoinSink) {
     ExecNode* right_source;
     for (auto source : {&left_source, &right_source}) {
       ASSERT_OK_AND_ASSIGN(
-          *source, MakeExecNode("source", plan.get(), {},
+          *source, MakeExecNode("asyncgen_source", plan.get(), {},
                                 SourceNodeOptions{input.schema,
                                                   input.gen(parallel, /*slow=*/false)}));
     }
@@ -1344,7 +1321,7 @@ TEST(ExecPlanExecution, SelfOuterHashJoinSink) {
         auto hashjoin,
         MakeExecNode("hashjoin", plan.get(), {left_filter, right_filter}, join_opts));
 
-    ASSERT_OK_AND_ASSIGN(std::ignore, MakeExecNode("sink", plan.get(), {hashjoin},
+    ASSERT_OK_AND_ASSIGN(std::ignore, MakeExecNode("asyncgen_sink", plan.get(), {hashjoin},
                                                    SinkNodeOptions{&sink_gen}));
 
     ASSERT_FINISHES_OK_AND_ASSIGN(auto result, StartAndCollect(plan.get(), sink_gen));
@@ -1384,8 +1361,8 @@ TEST(ExecPlan, RecordBatchReaderSourceSink) {
 
   ASSERT_OK(
       Declaration::Sequence({
-                                {"source", SourceNodeOptions{table->schema(), batch_gen}},
-                                {"sink", SinkNodeOptions{&sink_gen}},
+                                {"asyncgen_source", SourceNodeOptions{table->schema(), batch_gen}},
+                                {"asyncgen_sink", SinkNodeOptions{&sink_gen}},
                             })
           .AddToPlan(plan.get()));
 

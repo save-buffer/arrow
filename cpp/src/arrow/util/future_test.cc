@@ -1060,10 +1060,11 @@ TEST_F(FutureSchedulingTest, ScheduleIfDifferentExecutor) {
     bool OwnsThisThread() override { return pool_->OwnsThisThread(); }
 
     Status SpawnReal(internal::TaskHints hints, internal::FnOnce<void()> task,
-                     StopToken stop_token, StopCallback&& stop_callback) override {
+                     StopToken stop_token, StopCallback&& stop_callback,
+                     const std::atomic<bool> *pause_toggle = nullptr) override {
       ++spawn_count;
       return pool_->Spawn(hints, std::move(task), std::move(stop_token),
-                          std::move(stop_callback));
+                          std::move(stop_callback), pause_toggle);
     }
 
     std::atomic<int> spawn_count{0};

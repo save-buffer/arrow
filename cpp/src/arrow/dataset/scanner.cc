@@ -385,7 +385,7 @@ Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync(
             [&plan, &exec_context] { return [plan, exec_context](const Status&) {}; });
 
         if (not_finished_yet) {
-          plan->StopProducing();
+          plan->Abort();
         }
       }};
 

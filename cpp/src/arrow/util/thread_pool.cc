@@ -48,6 +48,7 @@ struct Task {
   FnOnce<void()> callable;
   StopToken stop_token;
   Executor::StopCallback stop_callback;
+  const std::atomic<bool> *pause_toggle;
 };
 
 }  // namespace
@@ -76,7 +77,9 @@ SerialExecutor::~SerialExecutor() {
 }
 
 Status SerialExecutor::SpawnReal(TaskHints hints, FnOnce<void()> task,
-                                 StopToken stop_token, StopCallback&& stop_callback) {
+                                 StopToken stop_token,
+                                 StopCallback&& stop_callback,
+                                 const std::atomic<bool> *pause_toggle) {
 #ifdef ARROW_WITH_OPENTELEMETRY
   // Wrap the task to propagate a parent tracing span to it
   struct SpanWrapper {
@@ -107,7 +110,7 @@ Status SerialExecutor::SpawnReal(TaskHints hints, FnOnce<void()> task,
           "been abandoned");
     }
     state->task_queue.push_back(
-        Task{std::move(task), std::move(stop_token), std::move(stop_callback)});
+        Task{std::move(task), std::move(stop_token), std::move(stop_callback), pause_toggle});
   }
   state->wait_for_tasks.notify_one();
   return Status::OK();
@@ -161,7 +164,8 @@ void SerialExecutor::RunLoop() {
       Task task = std::move(state_->task_queue.front());
       state_->task_queue.pop_front();
       lk.unlock();
-      if (!task.stop_token.IsStopRequested()) {
+      bool paused = task.pause_toggle && task.pause_toggle->load(std::memory_order_relaxed);
+      if (!paused && !task.stop_token.IsStopRequested()) {
         std::move(task.callable)();
       } else {
         if (task.stop_callback) {
@@ -243,7 +247,8 @@ static void WorkerLoop(std::shared_ptr<ThreadPool::State> state,
         state->pending_tasks_.pop_front();
         StopToken* stop_token = &task.stop_token;
         lock.unlock();
-        if (!stop_token->IsStopRequested()) {
+        bool paused = task.pause_toggle && task.pause_toggle->load(std::memory_order_relaxed);
+        if (!paused && !stop_token->IsStopRequested()) {
           std::move(task.callable)();
         } else {
           if (task.stop_callback) {
@@ -421,7 +426,7 @@ void ThreadPool::LaunchWorkersUnlocked(int threads) {
 }
 
 Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken stop_token,
-                             StopCallback&& stop_callback) {
+                             StopCallback&& stop_callback, const std::atomic<bool> *pause_toggle) {
   {
     ProtectAgainstFork();
 #ifdef ARROW_WITH_OPENTELEMETRY
@@ -452,7 +457,7 @@ Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken sto
       LaunchWorkersUnlocked(/*threads=*/1);
     }
     state_->pending_tasks_.push_back(
-        {std::move(task), std::move(stop_token), std::move(stop_callback)});
+        {std::move(task), std::move(stop_token), std::move(stop_callback), pause_toggle});
   }
   state_->cv_.notify_one();
   return Status::OK();

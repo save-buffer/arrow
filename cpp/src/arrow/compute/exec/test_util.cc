@@ -57,12 +57,55 @@ using internal::Executor;
 namespace compute {
 namespace {
 
-struct DummyNode : ExecNode {
-  DummyNode(ExecPlan* plan, NodeVector inputs,
-            bool is_sink, StartProducingFunc start_producing, StopProducingFunc stop_producing)
-      : ExecNode(plan, std::move(inputs), {}, dummy_schema(), is_sink),
-        start_producing_(std::move(start_producing)),
-        stop_producing_(std::move(stop_producing)) {
+    std::shared_ptr<Schema> dummy_schema()
+    {
+        return schema({field("dummy", null())});
+    }
+
+    struct DummySourceNode : public SourceNode
+    {
+        DummySourceNode(ExecPlan *plan, StartProducingFunc start_producing, AbortFunc abort)
+            : SourceNode(plan, dummy_schema()),
+              start_producing_(std::move(start_producing)),
+              abort_(std::move(abort))
+        {}
+
+        const char *kind_name() const override { return "DummySource"; }
+
+        Status Init() override { return Status::OK(); }
+
+        Status StartProducing() override
+        {
+            if(start_producing_)
+                RETURN_NOT_OK(start_producing_(this));
+            started_ = true;
+            return Status::OK();
+        }
+
+        void PauseProducing(int32_t counter) override {
+        }
+
+        void ResumeProducing(int32_t counter) override {
+        }
+
+        void Abort() override {
+            if (started_) {
+                if (abort_) {
+                    abort_(this);
+                }
+            }
+        }
+
+    private:
+        bool started_ = false;
+        StartProducingFunc start_producing_;
+        AbortFunc abort_;
+    };
+
+struct DummyNode : public ExecNode {
+  DummyNode(ExecPlan* plan, NodeVector inputs, AbortFunc abort)
+      : ExecNode(plan, std::move(inputs), {}, dummy_schema()),
+        abort_(std::move(abort)) {
     input_labels_.resize(inputs_.size());
     for (size_t i = 0; i < input_labels_.size(); ++i) {
       input_labels_[i] = std::to_string(i);
@@ -71,19 +114,11 @@ struct DummyNode : ExecNode {
 
   const char* kind_name() const override { return "Dummy"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {}
+  Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override { return Status::OK(); }
 
-  void ErrorReceived(ExecNode* input, Status error) override {}
+  Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override { return Status::OK(); }
 
-  void InputFinished(ExecNode* input, int total_batches) override {}
-
-  Status StartProducing() override {
-    if (start_producing_) {
-      RETURN_NOT_OK(start_producing_(this));
-    }
-    started_ = true;
-    return Status::OK();
-  }
+  Status Init() override { return Status::OK(); }
 
   void PauseProducing(int32_t counter) override {
   }
@@ -91,43 +126,82 @@ struct DummyNode : ExecNode {
   void ResumeProducing(int32_t counter) override {
   }
 
-  void StopProducing() override {
-    if (started_) {
-      for (const auto& input : inputs_) {
-        input->StopProducing();
+  void Abort() override {
+      if (abort_) {
+          abort_(this);
       }
-      if (stop_producing_) {
-        stop_producing_(this);
-      }
-    }
   }
 
-  Future<> finished() override { return Future<>::MakeFinished(); }
-
- private:
-  std::shared_ptr<Schema> dummy_schema() const {
-    return schema({field("dummy", null())});
-  }
-
-  StartProducingFunc start_producing_;
-  StopProducingFunc stop_producing_;
-  std::unordered_set<ExecNode*> requested_stop_;
-  bool started_ = false;
+ protected:
+  AbortFunc abort_;
 };
+
+    struct DummySinkNode : public SinkNode
+    {
+        DummySinkNode(ExecPlan *plan, ExecNode *input, AbortFunc abort)
+            : SinkNode(plan, input),
+              abort_(std::move(abort))
+        {
+            input_labels_.push_back(std::to_string(0));
+        }
+
+        const char* kind_name() const override { return "DummySink"; }
+
+        Status InputReceived(size_t thread_index, ExecNode* input, ExecBatch batch) override { return Status::OK(); }
+
+        Status InputFinished(size_t thread_index, ExecNode* input, int total_batches) override { return Status::OK(); }
+
+        Status Init() override { return Status::OK(); }
+
+        void PauseProducing(int32_t counter) override {
+        }
+
+        void ResumeProducing(int32_t counter) override {
+        }
+
+        void Abort() override {
+            if (abort_) {
+                abort_(this);
+            }
+        }
+
+    protected:
+        AbortFunc abort_;
+    };
 
 }  // namespace
 
+    ExecNode* MakeDummySourceNode(ExecPlan *plan,
+                                  std::string label,
+                                  StartProducingFunc start_producing,
+                                  AbortFunc abort)
+    {
+        auto node = plan->EmplaceNode<DummySourceNode>(plan, std::move(start_producing), std::move(abort));
+        if(!label.empty())
+            node->SetLabel(std::move(label));
+        return node;
+    }
+
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
-                        bool is_sink, StartProducingFunc start_producing,
-                        StopProducingFunc stop_producing) {
+                        AbortFunc abort) {
   auto node =
-      plan->EmplaceNode<DummyNode>(plan, std::move(inputs), is_sink,
-                                   std::move(start_producing), std::move(stop_producing));
+      plan->EmplaceNode<DummyNode>(plan, std::move(inputs), std::move(abort));
   if (!label.empty()) {
     node->SetLabel(std::move(label));
   }
   return node;
 }
+
+    ExecNode* MakeDummySinkNode(ExecPlan *plan,
+                                std::string label,
+                                ExecNode *input,
+                                AbortFunc abort)
+    {
+        auto node = plan->EmplaceNode<DummySinkNode>(plan, input, std::move(abort));
+        if(!label.empty())
+            node->SetLabel(std::move(label));
+        return node;
+    }
 
 ExecBatch ExecBatchFromJSON(const std::vector<ValueDescr>& descrs,
                             util::string_view json) {
