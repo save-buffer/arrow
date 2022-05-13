@@ -98,7 +98,6 @@ struct ExecPlanImpl : public ExecPlan {
   int RegisterTaskGroup(std::function<Status(size_t, int64_t)> task,
                         std::function<Status(size_t)> on_finished) {
     return task_scheduler_->RegisterTaskGroup(std::move(task), std::move(on_finished));
-    ;
   }
 
   Status StartTaskGroup(int task_group_id, int64_t num_tasks) {

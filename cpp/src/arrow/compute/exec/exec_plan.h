@@ -169,7 +169,7 @@ class ARROW_EXPORT ExecNode {
   /// knows when it has received all input, regardless of order.
   virtual void InputFinished(ExecNode* input, int total_batches) = 0;
 
-  virtual Status Init() { return Status::OK(); };
+  virtual Status Init() { return Status::OK(); }
 
   /// Lifecycle API:
   /// - start / stop to initiate and terminate production
@@ -267,7 +267,7 @@ class ARROW_EXPORT ExecNode {
   virtual void StopProducing() = 0;
 
   /// \brief A future which will be marked finished when this node has stopped producing.
-  virtual Future<> finished() { return finished_; };
+  virtual Future<> finished() { return finished_; }
 
   std::string ToString(int indent = 0) const;
 
