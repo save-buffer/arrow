@@ -85,7 +85,7 @@ Future<T> AsyncGeneratorEnd() {
 
 /// returning a future that completes when all have been visited
 template <typename T, typename Visitor>
-Future<> VisitAsyncGenerator(AsyncGenerator<T> generator, Visitor visitor) {
+Future<> VisitAsyncGenerator(AsyncGenerator<T> generator, Visitor visitor, CallbackOptions options = CallbackOptions::Defaults()) {
   struct LoopBody {
     struct Callback {
       Result<ControlFlow<>> operator()(const T& next) {
@@ -107,14 +107,15 @@ Future<> VisitAsyncGenerator(AsyncGenerator<T> generator, Visitor visitor) {
     Future<ControlFlow<>> operator()() {
       Callback callback{visitor};
       auto next = generator();
-      return next.Then(std::move(callback));
+      return next.Then(std::move(callback), {}, opts);
     }
 
     AsyncGenerator<T> generator;
     Visitor visitor;
+    CallbackOptions opts;
   };
 
-  return Loop(LoopBody{std::move(generator), std::move(visitor)});
+  return Loop(LoopBody{std::move(generator), std::move(visitor), options});
 }
 
 /// \brief Wait for an async generator to complete, discarding results.

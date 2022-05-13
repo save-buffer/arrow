@@ -188,7 +188,7 @@ class ScalarAggregateNode : public ExecNode {
     return Status::OK();
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
@@ -199,25 +199,21 @@ class ScalarAggregateNode : public ExecNode {
 
     auto thread_index = plan_->GetThreadIndex();
 
-    if (ErrorIfNotOk(DoConsume(std::move(batch), thread_index))) return;
+    RETURN_NOT_OK(DoConsume(std::move(batch), thread_index));
 
     if (input_counter_.Increment()) {
-      ErrorIfNotOk(Finish());
+      return Finish();
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-    outputs_[0]->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
     DCHECK_EQ(input, inputs_[0]);
     if (input_counter_.SetTotal(total_batches)) {
-      ErrorIfNotOk(Finish());
+      return Finish();
     }
+    return Status::OK();
   }
 
   Status StartProducing() override {
@@ -227,8 +223,7 @@ class ScalarAggregateNode : public ExecNode {
                         {"node.kind", kind_name()}});
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     // Scalar aggregates will only output a single batch
-    outputs_[0]->InputFinished(this, 1);
-    return Status::OK();
+    return outputs_[0]->InputFinished(this, 1);
   }
 
   void PauseProducing(ExecNode* output, int32_t counter) override {
@@ -237,19 +232,6 @@ class ScalarAggregateNode : public ExecNode {
 
   void ResumeProducing(ExecNode* output, int32_t counter) override {
     inputs_[0]->ResumeProducing(this, counter);
-  }
-
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
-  }
-
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-    if (input_counter_.Cancel()) {
-      finished_.MarkFinished();
-    }
-    inputs_[0]->StopProducing(this);
   }
 
   Future<> finished() override { return finished_; }
@@ -283,7 +265,7 @@ class ScalarAggregateNode : public ExecNode {
       RETURN_NOT_OK(kernels_[i]->finalize(&ctx, &batch.values[i]));
     }
 
-    outputs_[0]->InputReceived(this, std::move(batch));
+    RETURN_NOT_OK(outputs_[0]->InputReceived(this, std::move(batch)));
     finished_.MarkFinished();
     return Status::OK();
   }
@@ -317,8 +299,7 @@ class GroupByNode : public ExecNode {
   Status Init() override {
     output_task_group_id_ = plan_->RegisterTaskGroup(
         [this](size_t, int64_t task_id) {
-          OutputNthBatch(task_id);
-          return Status::OK();
+          return OutputNthBatch(task_id);
         },
         [this](size_t) {
           finished_.MarkFinished();
@@ -522,12 +503,12 @@ class GroupByNode : public ExecNode {
     return out_data;
   }
 
-  void OutputNthBatch(int64_t n) {
+  Status OutputNthBatch(int64_t n) {
     // bail if StopProducing was called
-    if (finished_.is_finished()) return;
+    if (finished_.is_finished()) return Status::OK();
 
     int64_t batch_size = output_batch_size();
-    outputs_[0]->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
+    return outputs_[0]->InputReceived(this, out_data_.Slice(batch_size * n, batch_size));
   }
 
   Status OutputResult() {
@@ -535,12 +516,12 @@ class GroupByNode : public ExecNode {
     ARROW_ASSIGN_OR_RAISE(out_data_, Finalize());
 
     int64_t num_output_batches = bit_util::CeilDiv(out_data_.length, output_batch_size());
-    outputs_[0]->InputFinished(this, static_cast<int>(num_output_batches));
+    RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(num_output_batches)));
     RETURN_NOT_OK(plan_->StartTaskGroup(output_task_group_id_, num_output_batches));
     return Status::OK();
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
@@ -549,36 +530,29 @@ class GroupByNode : public ExecNode {
                                     {"batch.length", batch.length}});
 
     // bail if StopProducing was called
-    if (finished_.is_finished()) return;
+    if (finished_.is_finished()) return Status::OK();
 
     DCHECK_EQ(input, inputs_[0]);
 
-    if (ErrorIfNotOk(Consume(std::move(batch)))) return;
+    RETURN_NOT_OK(Consume(std::move(batch)));
 
     if (input_counter_.Increment()) {
-      ErrorIfNotOk(OutputResult());
+        RETURN_NOT_OK(OutputResult());
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-
-    DCHECK_EQ(input, inputs_[0]);
-
-    outputs_[0]->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
 
-    // bail if StopProducing was called
-    if (finished_.is_finished()) return;
+    if (finished_.is_finished()) return Status::OK();;
 
     DCHECK_EQ(input, inputs_[0]);
 
     if (input_counter_.SetTotal(total_batches)) {
-      ErrorIfNotOk(OutputResult());
+      return OutputResult();
     }
+    return Status::OK();
   }
 
   Status StartProducing() override {
@@ -601,17 +575,6 @@ class GroupByNode : public ExecNode {
     // TODO(ARROW-16260)
     // Without spillover there is way to handle backpressure in this node
   }
-
-  void StopProducing(ExecNode* output) override {
-    EVENT(span_, "StopProducing");
-    DCHECK_EQ(output, outputs_[0]);
-
-    ARROW_UNUSED(input_counter_.Cancel());
-    finished_.MarkFinished();
-    inputs_[0]->StopProducing(this);
-  }
-
-  void StopProducing() override { StopProducing(outputs_[0]); }
 
   Future<> finished() override { return finished_; }
 

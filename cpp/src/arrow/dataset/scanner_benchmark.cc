@@ -96,7 +96,7 @@ std::shared_ptr<Schema> GetSchema() {
 
 size_t GetBytesForSchema() { return sizeof(int32_t) + sizeof(bool); }
 
-void MinimalEndToEndScan(size_t num_batches, size_t batch_size, bool async_mode) {
+void MinimalEndToEndScan(size_t num_batches, size_t batch_size) {
   // NB: This test is here for didactic purposes
 
   // Specify a MemoryPool and ThreadPool for the ExecPlan
@@ -137,7 +137,7 @@ void MinimalEndToEndScan(size_t num_batches, size_t batch_size, bool async_mode)
   ASSERT_OK_AND_ASSIGN(
       compute::ExecNode * filter,
       compute::MakeExecNode("filter", plan.get(), {scan},
-                            compute::FilterNodeOptions{b_is_true, async_mode}));
+                            compute::FilterNodeOptions{b_is_true}));
 
   // pipe the filter node into a project node
   // NB: we're using the project node factory which preserves fragment/batch index
@@ -146,7 +146,7 @@ void MinimalEndToEndScan(size_t num_batches, size_t batch_size, bool async_mode)
   ASSERT_OK_AND_ASSIGN(
       compute::ExecNode * project,
       compute::MakeExecNode("augmented_project", plan.get(), {filter},
-                            compute::ProjectNodeOptions{{a_times_2}, {}, async_mode}));
+                            compute::ProjectNodeOptions{{a_times_2}, {}}));
 
   // finally, pipe the project node into a sink node
   AsyncGenerator<util::optional<compute::ExecBatch>> sink_gen;
@@ -175,10 +175,9 @@ void MinimalEndToEndScan(size_t num_batches, size_t batch_size, bool async_mode)
 static void MinimalEndToEndBench(benchmark::State& state) {
   size_t num_batches = state.range(0);
   size_t batch_size = state.range(1);
-  bool async_mode = state.range(2);
 
   for (auto _ : state) {
-    MinimalEndToEndScan(num_batches, batch_size, async_mode);
+    MinimalEndToEndScan(num_batches, batch_size);
   }
   state.SetItemsProcessed(state.iterations() * num_batches);
   state.SetBytesProcessed(state.iterations() * num_batches * batch_size *
@@ -190,15 +189,13 @@ static const std::vector<int32_t> kWorkload = {100, 1000, 10000, 100000};
 static void MinimalEndToEnd_Customize(benchmark::internal::Benchmark* b) {
   for (const int32_t num_batches : kWorkload) {
     for (const int batch_size : {10, 100, 1000}) {
-      for (const bool async_mode : {true, false}) {
-        b->Args({num_batches, batch_size, async_mode});
+        b->Args({num_batches, batch_size});
         RecordBatchVector batches =
             ::arrow::compute::GenerateBatches(GetSchema(), num_batches, batch_size);
         StoreBatches(num_batches, batch_size, batches);
-      }
     }
   }
-  b->ArgNames({"num_batches", "batch_size", "async_mode"});
+  b->ArgNames({"num_batches", "batch_size"});
   b->UseRealTime();
 }
 

@@ -514,10 +514,10 @@ class HashJoinNode : public ExecNode {
 
   const char* kind_name() const override { return "HashJoinNode"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
     if (complete_.load()) {
-      return;
+      return Status::OK();
     }
 
     size_t thread_index = plan_->GetThreadIndex();
@@ -528,32 +528,14 @@ class HashJoinNode : public ExecNode {
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
                                    {{"batch.length", batch.length}});
 
-    {
-      Status status = impl_->InputReceived(thread_index, side, std::move(batch));
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
-    }
+    RETURN_NOT_OK(impl_->InputReceived(thread_index, side, std::move(batch)));
     if (batch_count_[side].Increment()) {
-      Status status = impl_->InputFinished(side);
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
+      return impl_->InputFinished(side);
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-    StopProducing();
-    outputs_[0]->ErrorReceived(this, std::move(error));
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
 
     int side = (input == inputs_[0]) ? 0 : 1;
@@ -561,21 +543,17 @@ class HashJoinNode : public ExecNode {
     EVENT(span_, "InputFinished", {{"side", side}, {"batches.length", total_batches}});
 
     if (batch_count_[side].SetTotal(total_batches)) {
-      Status status = impl_->InputFinished(side);
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-        return;
-      }
+      return impl_->InputFinished(side);
     }
+    return Status::OK();
   }
 
   Status Init() override {
     size_t num_threads = plan_->thread_capacity();
     RETURN_NOT_OK(impl_->Init(
         plan_->exec_context(), join_type_, num_threads, schema_mgr_.get(), key_cmp_,
-        filter_, [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
-        [this](int64_t total_num_batches) { this->FinishedCallback(total_num_batches); },
+        filter_, [this](ExecBatch batch) { return this->OutputBatchCallback(batch); },
+        [this](int64_t total_num_batches) { return this->FinishedCallback(total_num_batches); },
         [this](std::function<Status(size_t, int64_t)> task,
                std::function<Status(size_t)> on_finished) {
           return plan_->RegisterTaskGroup(std::move(task), std::move(on_finished));
@@ -604,33 +582,26 @@ class HashJoinNode : public ExecNode {
     // TODO(ARROW-16246)
   }
 
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
-  }
-
-  void StopProducing() override {
+  void Abort() override {
     EVENT(span_, "StopProducing");
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
-      for (auto&& input : inputs_) {
-        input->StopProducing(this);
-      }
       impl_->Abort([this]() { finished_.MarkFinished(); });
     }
   }
 
  private:
-  void OutputBatchCallback(ExecBatch batch) {
-    outputs_[0]->InputReceived(this, std::move(batch));
+  Status OutputBatchCallback(ExecBatch batch) {
+    return outputs_[0]->InputReceived(this, std::move(batch));
   }
 
-  void FinishedCallback(int64_t total_num_batches) {
+  Status FinishedCallback(int64_t total_num_batches) {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
-      outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
+      RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches)));
       finished_.MarkFinished();
     }
+    return Status::OK();
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {

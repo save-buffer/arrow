@@ -75,28 +75,21 @@ class UnionNode : public ExecNode {
     return plan->EmplaceNode<UnionNode>(plan, std::move(inputs));
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
 
     if (finished_.is_finished()) {
-      return;
+      return Status::OK();
     }
-    outputs_[0]->InputReceived(this, std::move(batch));
+    RETURN_NOT_OK(outputs_[0]->InputReceived(this, std::move(batch)));
     if (batch_count_.Increment()) {
       finished_.MarkFinished();
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-    outputs_[0]->ErrorReceived(this, std::move(error));
-
-    StopProducing();
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished",
           {{"input", input_count_.count()}, {"batches.length", total_batches}});
     ARROW_DCHECK(std::find(inputs_.begin(), inputs_.end(), input) != inputs_.end());
@@ -104,11 +97,12 @@ class UnionNode : public ExecNode {
     total_batches_.fetch_add(total_batches);
 
     if (input_count_.Increment()) {
-      outputs_[0]->InputFinished(this, total_batches_.load());
+      RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches_.load()));
       if (batch_count_.SetTotal(total_batches_.load())) {
         finished_.MarkFinished();
       }
     }
+    return Status::OK();
   }
 
   Status StartProducing() override {
@@ -130,26 +124,6 @@ class UnionNode : public ExecNode {
   void ResumeProducing(ExecNode* output, int32_t counter) override {
     for (auto* input : inputs_) {
       input->ResumeProducing(this, counter);
-    }
-  }
-
-  void StopProducing(ExecNode* output) override {
-    EVENT(span_, "StopProducing");
-    DCHECK_EQ(output, outputs_[0]);
-    if (batch_count_.Cancel()) {
-      finished_.MarkFinished();
-    }
-    for (auto&& input : inputs_) {
-      input->StopProducing(this);
-    }
-  }
-
-  void StopProducing() override {
-    if (batch_count_.Cancel()) {
-      finished_.MarkFinished();
-    }
-    for (auto&& input : inputs_) {
-      input->StopProducing(this);
     }
   }
 

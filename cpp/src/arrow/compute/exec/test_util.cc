@@ -59,10 +59,10 @@ namespace {
 
 struct DummyNode : ExecNode {
   DummyNode(ExecPlan* plan, NodeVector inputs, int num_outputs,
-            StartProducingFunc start_producing, StopProducingFunc stop_producing)
+            StartProducingFunc start_producing, AbortFunc abort)
       : ExecNode(plan, std::move(inputs), {}, dummy_schema(), num_outputs),
         start_producing_(std::move(start_producing)),
-        stop_producing_(std::move(stop_producing)) {
+        abort_(std::move(abort)) {
     input_labels_.resize(inputs_.size());
     for (size_t i = 0; i < input_labels_.size(); ++i) {
       input_labels_[i] = std::to_string(i);
@@ -71,17 +71,16 @@ struct DummyNode : ExecNode {
 
   const char* kind_name() const override { return "Dummy"; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {}
+  Status InputReceived(ExecNode* input, ExecBatch batch) override { return Status::OK(); }
 
-  void ErrorReceived(ExecNode* input, Status error) override {}
-
-  void InputFinished(ExecNode* input, int total_batches) override {}
+  Status InputFinished(ExecNode* input, int total_batches) override { return Status::OK(); }
 
   Status StartProducing() override {
     if (start_producing_) {
       RETURN_NOT_OK(start_producing_(this));
     }
     started_ = true;
+    finished_.MarkFinished();
     return Status::OK();
   }
 
@@ -95,23 +94,13 @@ struct DummyNode : ExecNode {
     AssertIsOutput(output);
   }
 
-  void StopProducing(ExecNode* output) override {
-    EXPECT_GE(num_outputs(), 0) << "Sink nodes should not experience backpressure";
-    AssertIsOutput(output);
-  }
-
-  void StopProducing() override {
-    if (started_) {
-      for (const auto& input : inputs_) {
-        input->StopProducing(this);
+  void Abort() override {
+      if (abort_) {
+          abort_(this);
       }
-      if (stop_producing_) {
-        stop_producing_(this);
-      }
-    }
+      if(!finished_.is_finished())
+          finished_.MarkFinished();
   }
-
-  Future<> finished() override { return Future<>::MakeFinished(); }
 
  private:
   void AssertIsOutput(ExecNode* output) {
@@ -124,7 +113,7 @@ struct DummyNode : ExecNode {
   }
 
   StartProducingFunc start_producing_;
-  StopProducingFunc stop_producing_;
+  AbortFunc abort_;
   std::unordered_set<ExecNode*> requested_stop_;
   bool started_ = false;
 };
@@ -133,10 +122,10 @@ struct DummyNode : ExecNode {
 
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
                         int num_outputs, StartProducingFunc start_producing,
-                        StopProducingFunc stop_producing) {
+                        AbortFunc abort) {
   auto node =
       plan->EmplaceNode<DummyNode>(plan, std::move(inputs), num_outputs,
-                                   std::move(start_producing), std::move(stop_producing));
+                                   std::move(start_producing), std::move(abort));
   if (!label.empty()) {
     node->SetLabel(std::move(label));
   }

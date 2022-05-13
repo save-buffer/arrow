@@ -484,7 +484,7 @@ bool TpchPseudotext::GenerateSentence(int64_t& offset, random::pcg32_fast& rng,
       success &= GenerateTerminator(offset, rng, arr);
       break;
     default:
-      Unreachable("Random number should be between 0 and 5 inclusive");
+      Unreachable("Random number should be between 0 and 4 inclusive");
       break;
   }
   return success;
@@ -492,8 +492,8 @@ bool TpchPseudotext::GenerateSentence(int64_t& offset, random::pcg32_fast& rng,
 
 class TpchTableGenerator {
  public:
-  using OutputBatchCallback = std::function<void(ExecBatch)>;
-  using FinishedCallback = std::function<void(int64_t)>;
+  using OutputBatchCallback = std::function<Status(ExecBatch)>;
+  using FinishedCallback = std::function<Status(int64_t)>;
   using GenerateFn = std::function<Status(size_t)>;
   using ScheduleCallback = std::function<Status(GenerateFn)>;
   using AbortCallback = std::function<void()>;
@@ -2510,11 +2510,11 @@ class SupplierGenerator : public TpchTableGenerator {
     int64_t batches_to_generate = (rows_to_generate_ + batch_size_ - 1) / batch_size_;
     int64_t batches_outputted_before_this_one = batches_outputted_.fetch_add(1);
     bool is_last_batch = batches_outputted_before_this_one == (batches_to_generate - 1);
-    output_callback_(std::move(eb));
+    RETURN_NOT_OK(output_callback_(std::move(eb)));
     if (is_last_batch) {
       bool expected = false;
       if (done_.compare_exchange_strong(expected, true))
-        finished_callback_(batches_outputted_.load());
+        return finished_callback_(batches_outputted_.load());
       return Status::OK();
     }
     return schedule_callback_(
@@ -2718,14 +2718,14 @@ class PartGenerator : public TpchTableGenerator {
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -2780,14 +2780,14 @@ class PartSuppGenerator : public TpchTableGenerator {
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -2894,11 +2894,11 @@ class CustomerGenerator : public TpchTableGenerator {
     int64_t batches_to_generate = (rows_to_generate_ + batch_size_ - 1) / batch_size_;
     int64_t batches_generated_before_this_one = batches_outputted_.fetch_add(1);
     bool is_last_batch = batches_generated_before_this_one == (batches_to_generate - 1);
-    output_callback_(std::move(eb));
+    RETURN_NOT_OK(output_callback_(std::move(eb)));
     if (is_last_batch) {
       bool expected = false;
       if (done_.compare_exchange_strong(expected, true))
-        finished_callback_(batches_outputted_.load());
+        return finished_callback_(batches_outputted_.load());
       return Status::OK();
     }
     return schedule_callback_(
@@ -3099,14 +3099,14 @@ class OrdersGenerator : public TpchTableGenerator {
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(batches_outputted_.load());
         return Status::OK();
       }
       return schedule_callback_(
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -3161,7 +3161,7 @@ class LineitemGenerator : public TpchTableGenerator {
       if (batches_generated == batches_outputted_.load()) {
         bool expected = false;
         if (done_.compare_exchange_strong(expected, true))
-          finished_callback_(batches_outputted_.load());
+          return finished_callback_(batches_outputted_.load());
         return Status::OK();
       }
       // We may have generated but not outputted all of the batches.
@@ -3169,7 +3169,7 @@ class LineitemGenerator : public TpchTableGenerator {
           [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
     }
     ExecBatch batch = std::move(*maybe_batch);
-    output_callback_(std::move(batch));
+    RETURN_NOT_OK(output_callback_(std::move(batch)));
     batches_outputted_++;
     return schedule_callback_(
         [this](size_t thread_index) { return this->ProduceCallback(thread_index); });
@@ -3224,9 +3224,8 @@ class NationGenerator : public TpchTableGenerator {
     std::vector<Datum> result;
     for (const int& col : column_indices_) result.push_back(fields[col]);
     ARROW_ASSIGN_OR_RAISE(ExecBatch batch, ExecBatch::Make(std::move(result)));
-    output_callback(std::move(batch));
-    finished_callback(static_cast<int64_t>(1));
-    return Status::OK();
+    RETURN_NOT_OK(output_callback(std::move(batch)));
+    return finished_callback(static_cast<int64_t>(1));
   }
 
   std::shared_ptr<Schema> schema() const override { return schema_; }
@@ -3313,9 +3312,8 @@ class RegionGenerator : public TpchTableGenerator {
     std::vector<Datum> result;
     for (const int& col : column_indices_) result.push_back(fields[col]);
     ARROW_ASSIGN_OR_RAISE(ExecBatch batch, ExecBatch::Make(std::move(result)));
-    output_callback(std::move(batch));
-    finished_callback(static_cast<int64_t>(1));
-    return Status::OK();
+    RETURN_NOT_OK(output_callback(std::move(batch)));
+    return finished_callback(static_cast<int64_t>(1));
   }
 
   std::shared_ptr<Schema> schema() const override { return schema_; }
@@ -3370,17 +3368,15 @@ class TpchNode : public ExecNode {
     Unreachable("TPC-H node should never have any inputs");
   }
 
-  [[noreturn]] void InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
+  [[noreturn]] Status InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
 
-  [[noreturn]] void ErrorReceived(ExecNode*, Status) override { NoInputs(); }
-
-  [[noreturn]] void InputFinished(ExecNode*, int) override { NoInputs(); }
+  [[noreturn]] Status InputFinished(ExecNode*, int) override { NoInputs(); }
 
   Status StartProducing() override {
     return generator_->StartProducing(
         plan_->thread_capacity(),
-        [this](ExecBatch batch) { this->OutputBatchCallback(std::move(batch)); },
-        [this](int64_t num_batches) { this->FinishedCallback(num_batches); },
+        [this](ExecBatch batch) { return this->OutputBatchCallback(std::move(batch)); },
+        [this](int64_t num_batches) { return this->FinishedCallback(num_batches); },
         [this](std::function<Status(size_t)> func) -> Status {
           return this->ScheduleTaskCallback(std::move(func));
         });
@@ -3393,37 +3389,26 @@ class TpchNode : public ExecNode {
     // TODO(ARROW-16087)
   }
 
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
-  }
-
-  void StopProducing() override {
+  void Abort() override {
     if (generator_->Abort()) finished_.MarkFinished();
   }
 
   Future<> finished() override { return finished_; }
 
  private:
-  void OutputBatchCallback(ExecBatch batch) {
-    outputs_[0]->InputReceived(this, std::move(batch));
+  Status OutputBatchCallback(ExecBatch batch) {
+    return outputs_[0]->InputReceived(this, std::move(batch));
   }
 
-  void FinishedCallback(int64_t total_num_batches) {
-    outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches));
+  Status FinishedCallback(int64_t total_num_batches) {
+    RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches)));
     finished_.MarkFinished();
+    return Status::OK();
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
     if (finished_.is_finished()) return Status::OK();
-    return plan_->ScheduleTask([this, func](size_t thread_index) {
-      Status status = func(thread_index);
-      if (!status.ok()) {
-        StopProducing();
-        ErrorIfNotOk(status);
-      }
-      return status;
-    });
+    return plan_->ScheduleTask(std::move(func));
   }
 
   const char* name_;

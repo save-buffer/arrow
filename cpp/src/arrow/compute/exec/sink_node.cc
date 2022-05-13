@@ -136,7 +136,6 @@ class SinkNode : public ExecNode {
                        {{"node.label", label()},
                         {"node.detail", ToString()},
                         {"node.kind", kind_name()}});
-    finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
 
     return Status::OK();
@@ -151,14 +150,6 @@ class SinkNode : public ExecNode {
   }
   [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
     NoOutputs();
-  }
-  [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
-
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-
-    Finish();
-    inputs_[0]->StopProducing(this);
   }
 
   Future<> finished() override { return finished_; }
@@ -185,7 +176,7 @@ class SinkNode : public ExecNode {
     }
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(
@@ -196,37 +187,34 @@ class SinkNode : public ExecNode {
 
     RecordBackpressureBytesUsed(batch);
     bool did_push = producer_.Push(std::move(batch));
-    if (!did_push) return;  // producer_ was Closed already
+    if (!did_push) return Status::OK();  // producer_ was Closed already
 
     if (input_counter_.Increment()) {
-      Finish();
+      return Finish();
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-
-    producer_.Push(std::move(error));
-
+  void Abort() override {
     if (input_counter_.Cancel()) {
-      Finish();
+      DCHECK_OK(Finish());
     }
-    inputs_[0]->StopProducing(this);
   }
 
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
     if (input_counter_.SetTotal(total_batches)) {
-      Finish();
+      return Finish();
     }
+    return Status::OK();
   }
 
  protected:
-  virtual void Finish() {
+  virtual Status Finish() {
     if (producer_.Close()) {
       finished_.MarkFinished();
     }
+    return Status::OK();
   }
 
   static Status ValidateOptions(const SinkNodeOptions& sink_options) {
@@ -286,7 +274,6 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
                         {"node.kind", kind_name()}});
     DCHECK_GT(inputs_.size(), 0);
     RETURN_NOT_OK(consumer_->Init(inputs_[0]->output_schema(), this));
-    finished_ = Future<>::Make();
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
   }
@@ -301,21 +288,14 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
   [[noreturn]] void PauseProducing(ExecNode* output, int32_t counter) override {
     NoOutputs();
   }
-  [[noreturn]] void StopProducing(ExecNode* output) override { NoOutputs(); }
 
   void Pause() override { inputs_[0]->PauseProducing(this, ++backpressure_counter_); }
 
   void Resume() override { inputs_[0]->ResumeProducing(this, ++backpressure_counter_); }
 
-  void StopProducing() override {
-    EVENT(span_, "StopProducing");
-    Finish(Status::Invalid("ExecPlan was stopped early"));
-    inputs_[0]->StopProducing(this);
-  }
-
   Future<> finished() override { return finished_; }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(
@@ -327,48 +307,32 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
     // This can happen if an error was received and the source hasn't yet stopped.  Since
     // we have already called consumer_->Finish we don't want to call consumer_->Consume
     if (input_counter_.Completed()) {
-      return;
+        return Status::OK();
     }
 
-    Status consumption_status = consumer_->Consume(std::move(batch));
-    if (!consumption_status.ok()) {
-      if (input_counter_.Cancel()) {
-        Finish(std::move(consumption_status));
-      }
-      inputs_[0]->StopProducing(this);
-      return;
-    }
-
+    RETURN_NOT_OK(consumer_->Consume(std::move(batch)));
     if (input_counter_.Increment()) {
-      Finish(Status::OK());
+      return Finish();
     }
+    return Status::OK();
   }
 
-  void ErrorReceived(ExecNode* input, Status error) override {
-    EVENT(span_, "ErrorReceived", {{"error", error.message()}});
-    DCHECK_EQ(input, inputs_[0]);
-
-    if (input_counter_.Cancel()) {
-      Finish(std::move(error));
-    }
-
-    inputs_[0]->StopProducing(this);
-  }
-
-  void InputFinished(ExecNode* input, int total_batches) override {
+  Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
     if (input_counter_.SetTotal(total_batches)) {
-      Finish(Status::OK());
+      return Finish();
     }
+    return Status::OK();
   }
 
  protected:
-  virtual void Finish(const Status& finish_st) {
-    consumer_->Finish().AddCallback([this, finish_st](const Status& st) {
-      // Prefer the plan error over the consumer error
-      Status final_status = finish_st & st;
-      finished_.MarkFinished(std::move(final_status));
+  virtual Status Finish() {
+    auto fut = consumer_->Finish();
+    fut.AddCallback([this](const Status &)
+    {
+        finished_.MarkFinished();
     });
+    return plan_->AddFuture(std::move(fut));
   }
 
   AtomicCounter input_counter_;
@@ -496,7 +460,7 @@ struct OrderBySinkNode final : public SinkNode {
     return ValidateCommonOrderOptions(options);
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(
@@ -505,21 +469,14 @@ struct OrderBySinkNode final : public SinkNode {
 
     DCHECK_EQ(input, inputs_[0]);
 
-    auto maybe_batch = batch.ToRecordBatch(inputs_[0]->output_schema(),
-                                           plan()->exec_context()->memory_pool());
-    if (ErrorIfNotOk(maybe_batch.status())) {
-      StopProducing();
-      if (input_counter_.Cancel()) {
-        finished_.MarkFinished(maybe_batch.status());
-      }
-      return;
-    }
-    auto record_batch = maybe_batch.MoveValueUnsafe();
+    ARROW_ASSIGN_OR_RAISE(auto result, batch.ToRecordBatch(inputs_[0]->output_schema(),
+                                                           plan()->exec_context()->memory_pool()));
+    impl_->InputReceived(std::move(result));
 
-    impl_->InputReceived(std::move(record_batch));
     if (input_counter_.Increment()) {
-      Finish();
+        return Finish();
     }
+    return Status::OK();
   }
 
  protected:
@@ -536,14 +493,11 @@ struct OrderBySinkNode final : public SinkNode {
     return Status::OK();
   }
 
-  void Finish() override {
+  Status Finish() override {
     util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "Finish", {{"node.label", label()}});
-    Status st = DoFinish();
-    if (ErrorIfNotOk(st)) {
-      producer_.Push(std::move(st));
-    }
-    SinkNode::Finish();
+    RETURN_NOT_OK(DoFinish());
+    return SinkNode::Finish();
   }
 
  protected:

@@ -34,11 +34,11 @@ using internal::checked_cast;
 namespace compute {
 namespace {
 
-class FilterNode : public MapNode {
+class FilterNode : public ExecNode {
  public:
   FilterNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-             std::shared_ptr<Schema> output_schema, Expression filter, bool async_mode)
-      : MapNode(plan, std::move(inputs), std::move(output_schema), async_mode),
+             std::shared_ptr<Schema> output_schema, Expression filter)
+      : ExecNode(plan, std::move(inputs), {"target"}, std::move(output_schema), /*num_outputs=*/1),
         filter_(std::move(filter)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -59,8 +59,7 @@ class FilterNode : public MapNode {
                                filter_expression.type()->ToString());
     }
     return plan->EmplaceNode<FilterNode>(plan, std::move(inputs), std::move(schema),
-                                         std::move(filter_expression),
-                                         filter_options.async_mode);
+                                         std::move(filter_expression));
   }
 
   const char* kind_name() const override { return "FilterNode"; }
@@ -98,22 +97,27 @@ class FilterNode : public MapNode {
     return ExecBatch::Make(std::move(values));
   }
 
-  void InputReceived(ExecNode* input, ExecBatch batch) override {
+  Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
-    auto func = [this](ExecBatch batch) {
-      util::tracing::Span span;
-      START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                     {{"filter", ToStringExtra()},
-                                      {"node.label", label()},
-                                      {"batch.length", batch.length}});
-      auto result = DoFilter(std::move(batch));
-      MARK_SPAN(span, result.status());
-      END_SPAN(span);
-      return result;
-    };
-    this->SubmitTask(std::move(func), std::move(batch));
+    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                                   {{"filter", ToStringExtra()},
+                                    {"node.label", label()},
+                                    {"batch.length", batch.length}});
+
+    util::tracing::Span span;
+    ARROW_ASSIGN_OR_RAISE(ExecBatch result, DoFilter(std::move(batch)));
+    END_SPAN(span);
+    return outputs_[0]->InputReceived(this, std::move(result));
   }
+
+    Status InputFinished(ExecNode *input, int total_batches) override
+    {
+        DCHECK_EQ(input, inputs_[0]);
+        RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches));
+        finished_.MarkFinished();
+        return Status::OK();
+    }
 
  protected:
   std::string ToStringExtra(int indent = 0) const override {

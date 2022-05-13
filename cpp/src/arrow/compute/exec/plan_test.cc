@@ -115,7 +115,7 @@ TEST(ExecPlanConstruction, AutoLabel) {
 }
 
 struct StartStopTracker {
-  std::vector<std::string> started, stopped;
+  std::vector<std::string> started, aborted;
 
   StartProducingFunc start_producing_func(Status st = Status::OK()) {
     return [this, st](ExecNode* node) {
@@ -124,8 +124,8 @@ struct StartStopTracker {
     };
   }
 
-  StopProducingFunc stop_producing_func() {
-    return [this](ExecNode* node) { stopped.push_back(node->label()); };
+  AbortFunc abort_func() {
+    return [this](ExecNode* node) { aborted.push_back(node->label()); };
   }
 };
 
@@ -135,40 +135,39 @@ TEST(ExecPlan, DummyStartProducing) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
 
   auto source1 = MakeDummyNode(plan.get(), "source1", /*inputs=*/{}, /*num_outputs=*/2,
-                               t.start_producing_func(), t.stop_producing_func());
+                               t.start_producing_func(), t.abort_func());
 
   auto source2 = MakeDummyNode(plan.get(), "source2", /*inputs=*/{}, /*num_outputs=*/1,
-                               t.start_producing_func(), t.stop_producing_func());
+                               t.start_producing_func(), t.abort_func());
 
   auto process1 =
       MakeDummyNode(plan.get(), "process1", /*inputs=*/{source1}, /*num_outputs=*/2,
-                    t.start_producing_func(), t.stop_producing_func());
+                    t.start_producing_func(), t.abort_func());
 
   auto process2 =
       MakeDummyNode(plan.get(), "process2", /*inputs=*/{process1, source2},
-                    /*num_outputs=*/1, t.start_producing_func(), t.stop_producing_func());
+                    /*num_outputs=*/1, t.start_producing_func(), t.abort_func());
 
   auto process3 =
       MakeDummyNode(plan.get(), "process3", /*inputs=*/{process1, source1, process2},
-                    /*num_outputs=*/1, t.start_producing_func(), t.stop_producing_func());
+                    /*num_outputs=*/1, t.start_producing_func(), t.abort_func());
 
   MakeDummyNode(plan.get(), "sink", /*inputs=*/{process3}, /*num_outputs=*/0,
-                t.start_producing_func(), t.stop_producing_func());
+                t.start_producing_func(), t.abort_func());
 
   ASSERT_OK(plan->Validate());
   ASSERT_EQ(t.started.size(), 0);
-  ASSERT_EQ(t.stopped.size(), 0);
+  ASSERT_EQ(t.aborted.size(), 0);
 
   ASSERT_OK(plan->StartProducing());
   // Note that any correct reverse topological order may do
   ASSERT_THAT(t.started, ElementsAre("sink", "process3", "process2", "process1",
                                      "source2", "source1"));
 
-  plan->StopProducing();
+  plan->Abort();
   ASSERT_THAT(plan->finished(), Finishes(Ok()));
   // Note that any correct topological order may do
-  ASSERT_THAT(t.stopped, ElementsAre("source1", "source2", "process1", "process2",
-                                     "process3", "sink"));
+  ASSERT_THAT(t.aborted, ElementsAre());
 
   ASSERT_THAT(plan->StartProducing(),
               Raises(StatusCode::Invalid, HasSubstr("restarted")));
@@ -180,36 +179,37 @@ TEST(ExecPlan, DummyStartProducingError) {
   ASSERT_OK_AND_ASSIGN(auto plan, ExecPlan::Make());
   auto source1 = MakeDummyNode(
       plan.get(), "source1", /*num_inputs=*/{}, /*num_outputs=*/2,
-      t.start_producing_func(Status::NotImplemented("zzz")), t.stop_producing_func());
+      t.start_producing_func(Status::NotImplemented("zzz")), t.abort_func());
 
   auto source2 =
       MakeDummyNode(plan.get(), "source2", /*num_inputs=*/{}, /*num_outputs=*/1,
-                    t.start_producing_func(), t.stop_producing_func());
+                    t.start_producing_func(), t.abort_func());
 
   auto process1 = MakeDummyNode(
       plan.get(), "process1", /*num_inputs=*/{source1}, /*num_outputs=*/2,
-      t.start_producing_func(Status::IOError("xxx")), t.stop_producing_func());
+      t.start_producing_func(Status::IOError("xxx")), t.abort_func());
 
   auto process2 =
       MakeDummyNode(plan.get(), "process2", /*num_inputs=*/{process1, source2},
-                    /*num_outputs=*/1, t.start_producing_func(), t.stop_producing_func());
+                    /*num_outputs=*/1, t.start_producing_func(), t.abort_func());
 
   auto process3 =
       MakeDummyNode(plan.get(), "process3", /*num_inputs=*/{process1, source1, process2},
-                    /*num_outputs=*/1, t.start_producing_func(), t.stop_producing_func());
+                    /*num_outputs=*/1, t.start_producing_func(), t.abort_func());
 
   MakeDummyNode(plan.get(), "sink", /*num_inputs=*/{process3}, /*num_outputs=*/0,
-                t.start_producing_func(), t.stop_producing_func());
+                t.start_producing_func(), t.abort_func());
 
   ASSERT_OK(plan->Validate());
   ASSERT_EQ(t.started.size(), 0);
-  ASSERT_EQ(t.stopped.size(), 0);
+  ASSERT_EQ(t.aborted.size(), 0);
 
   // `process1` raises IOError
   ASSERT_THAT(plan->StartProducing(), Raises(StatusCode::IOError));
   ASSERT_THAT(t.started, ElementsAre("sink", "process3", "process2", "process1"));
-  // Nodes that started successfully were stopped in reverse order
-  ASSERT_THAT(t.stopped, ElementsAre("process2", "process3", "sink"));
+  ASSERT_FINISHES_OK(plan->finished());
+  // Asser that all nodes are aborted
+  ASSERT_THAT(t.aborted, ElementsAre( "source1", "source2", "process1", "process2", "process3", "sink"));
 }
 
 TEST(ExecPlanExecution, SourceSink) {
@@ -350,7 +350,6 @@ TEST(ExecPlanExecution, SinkNodeBackpressure) {
 
   // Cleanup
   batch_producer.producer().Push(IterationEnd<util::optional<ExecBatch>>());
-  plan->StopProducing();
   ASSERT_FINISHES_OK(plan->finished());
 }
 
@@ -739,13 +738,12 @@ TEST(ExecPlanExecution, StressSourceGroupedSumStop) {
 
       ASSERT_OK(plan->Validate());
       ASSERT_OK(plan->StartProducing());
-      plan->StopProducing();
       ASSERT_FINISHES_OK(plan->finished());
     }
   }
 }
 
-TEST(ExecPlanExecution, StressSourceSinkStopped) {
+TEST(ExecPlanExecution, StressSourceSinkAborted) {
   for (bool slow : {false, true}) {
     SCOPED_TRACE(slow ? "slowed" : "unslowed");
 
@@ -773,7 +771,7 @@ TEST(ExecPlanExecution, StressSourceSinkStopped) {
 
       EXPECT_THAT(sink_gen(), Finishes(ResultWith(Optional(random_data.batches[0]))));
 
-      plan->StopProducing();
+      plan->Abort();
       ASSERT_THAT(plan->finished(), Finishes(Ok()));
     }
   }

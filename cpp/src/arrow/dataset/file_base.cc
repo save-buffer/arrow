@@ -430,13 +430,13 @@ Result<compute::ExecNode*> MakeWriteNode(compute::ExecPlan* plan,
 
 namespace {
 
-class TeeNode : public compute::MapNode {
+class TeeNode : public compute::ExecNode {
  public:
   TeeNode(compute::ExecPlan* plan, std::vector<compute::ExecNode*> inputs,
           std::shared_ptr<Schema> output_schema,
           std::unique_ptr<internal::DatasetWriter> dataset_writer,
-          FileSystemDatasetWriteOptions write_options, bool async_mode)
-      : MapNode(plan, std::move(inputs), std::move(output_schema), async_mode),
+          FileSystemDatasetWriteOptions write_options)
+      : ExecNode(plan, std::move(inputs), std::move(output_schema), /*num_outputs=*/1),
         dataset_writer_(std::move(dataset_writer)),
         write_options_(std::move(write_options)) {}
 
@@ -454,8 +454,7 @@ class TeeNode : public compute::MapNode {
                           internal::DatasetWriter::Make(write_options));
 
     return plan->EmplaceNode<TeeNode>(plan, std::move(inputs), std::move(schema),
-                                      std::move(dataset_writer), std::move(write_options),
-                                      /*async_mode=*/true);
+                                      std::move(dataset_writer), std::move(write_options));
   }
 
   const char* kind_name() const override { return "TeeNode"; }
@@ -485,22 +484,24 @@ class TeeNode : public compute::MapNode {
                       });
   }
 
-  void InputReceived(compute::ExecNode* input, compute::ExecBatch batch) override {
+  Status InputReceived(compute::ExecNode* input, compute::ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
-    auto func = [this](compute::ExecBatch batch) {
-      util::tracing::Span span;
-      START_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                             {{"tee", ToStringExtra()},
-                              {"node.label", label()},
-                              {"batch.length", batch.length}});
-      auto result = DoTee(std::move(batch));
-      MARK_SPAN(span, result.status());
-      END_SPAN(span);
-      return result;
-    };
-    this->SubmitTask(std::move(func), std::move(batch));
+    util::tracing::Span span;
+    START_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                           {{"tee", ToStringExtra()},
+                            {"node.label", label()},
+                            {"batch.length", batch.length}});
+    ARROW_ASSIGN_OR_RAISE(auto result, DoTee(std::move(batch)));
+    END_SPAN(span);
+    return outputs_[0]->InputReceived(this, std::move(result));
   }
+
+    Status InputFinished(compute::ExecNode *input, int total_batches)
+    {
+        DCHECK_EQ(input, inputs_[0]);
+        return outputs_[0]->InputFinished(input, total_batches);
+    }
 
   void Pause() { inputs_[0]->PauseProducing(this, ++backpressure_counter_); }
 

@@ -87,11 +87,7 @@ class ARROW_EXPORT ExecPlan : public std::enable_shared_from_this<ExecPlan> {
   /// is started before all of its inputs.
   Status StartProducing();
 
-  /// \brief Stop producing on all nodes
-  ///
-  /// Nodes are stopped in topological order, such that any node
-  /// is stopped before all of its outputs.
-  void StopProducing();
+  void Abort();
 
   /// \brief A future which will be marked finished when all nodes have stopped producing.
   Future<> finished();
@@ -157,17 +153,14 @@ class ARROW_EXPORT ExecNode {
   ///   and StopProducing()
 
   /// Transfer input batch to ExecNode
-  virtual void InputReceived(ExecNode* input, ExecBatch batch) = 0;
-
-  /// Signal error to ExecNode
-  virtual void ErrorReceived(ExecNode* input, Status error) = 0;
+  virtual Status InputReceived(ExecNode* input, ExecBatch batch) = 0;
 
   /// Mark the inputs finished after the given number of batches.
   ///
   /// This may be called before all inputs are received.  This simply fixes
   /// the total number of incoming batches for an input, so that the ExecNode
   /// knows when it has received all input, regardless of order.
-  virtual void InputFinished(ExecNode* input, int total_batches) = 0;
+  virtual Status InputFinished(ExecNode* input, int total_batches) = 0;
 
   virtual Status Init() { return Status::OK(); }
 
@@ -232,7 +225,7 @@ class ARROW_EXPORT ExecNode {
   /// methods must not be called.
   ///
   /// This is typically called automatically by ExecPlan::StartProducing().
-  virtual Status StartProducing() = 0;
+  virtual Status StartProducing() { return Status::OK(); };
 
   /// \brief Pause producing temporarily
   ///
@@ -245,7 +238,11 @@ class ARROW_EXPORT ExecNode {
   /// This may be called any number of times after StartProducing() succeeds.
   /// However, the node is still free to produce data (which may be difficult
   /// to prevent anyway if data is produced using multiple threads).
-  virtual void PauseProducing(ExecNode* output, int32_t counter) = 0;
+  virtual void PauseProducing(ExecNode* output, int32_t counter)
+  {
+      for(auto &n : inputs_)
+          n->PauseProducing(this, counter);
+  }
 
   /// \brief Resume producing after a temporary pause
   ///
@@ -255,16 +252,13 @@ class ARROW_EXPORT ExecNode {
   /// This call is a hint that an output node is willing to receive data again.
   ///
   /// This may be called any number of times after StartProducing() succeeds.
-  virtual void ResumeProducing(ExecNode* output, int32_t counter) = 0;
+  virtual void ResumeProducing(ExecNode* output, int32_t counter)
+  {
+      for(auto &n : inputs_)
+          n->ResumeProducing(this, counter);
+  }
 
-  /// \brief Stop producing definitively to a single output
-  ///
-  /// This call is a hint that an output node has completed and is not willing
-  /// to receive any further data.
-  virtual void StopProducing(ExecNode* output) = 0;
-
-  /// \brief Stop producing definitively to all outputs
-  virtual void StopProducing() = 0;
+  virtual void Abort() { if(!finished_.is_finished()) finished_.MarkFinished(); }
 
   /// \brief A future which will be marked finished when this node has stopped producing.
   virtual Future<> finished() { return finished_; }
@@ -274,10 +268,6 @@ class ARROW_EXPORT ExecNode {
  protected:
   ExecNode(ExecPlan* plan, NodeVector inputs, std::vector<std::string> input_labels,
            std::shared_ptr<Schema> output_schema, int num_outputs);
-
-  // A helper method to send an error status to all outputs.
-  // Returns true if the status was an error.
-  bool ErrorIfNotOk(Status status);
 
   /// Provide extra info to include in the string representation.
   virtual std::string ToStringExtra(int indent) const;
@@ -296,50 +286,6 @@ class ARROW_EXPORT ExecNode {
   Future<> finished_ = Future<>::Make();
 
   util::tracing::Span span_;
-};
-
-/// \brief MapNode is an ExecNode type class which process a task like filter/project
-/// (See SubmitTask method) to each given ExecBatch object, which have one input, one
-/// output, and are pure functions on the input
-///
-/// A simple parallel runner is created with a "map_fn" which is just a function that
-/// takes a batch in and returns a batch.  This simple parallel runner also needs an
-/// executor (use simple synchronous runner if there is no executor)
-
-class ARROW_EXPORT MapNode : public ExecNode {
- public:
-  MapNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
-          std::shared_ptr<Schema> output_schema, bool async_mode);
-
-  void ErrorReceived(ExecNode* input, Status error) override;
-
-  void InputFinished(ExecNode* input, int total_batches) override;
-
-  Status StartProducing() override;
-
-  void PauseProducing(ExecNode* output, int32_t counter) override;
-
-  void ResumeProducing(ExecNode* output, int32_t counter) override;
-
-  void StopProducing(ExecNode* output) override;
-
-  void StopProducing() override;
-
-  Future<> finished() override;
-
- protected:
-  void SubmitTask(std::function<Result<ExecBatch>(ExecBatch)> map_fn, ExecBatch batch);
-
-  void Finish(Status finish_st = Status::OK());
-
- protected:
-  // Counter for the number of batches received
-  AtomicCounter input_counter_;
-
-  ::arrow::internal::Executor* executor_;
-
-  // Variable used to cancel remaining tasks in the executor
-  StopSource stop_source_;
 };
 
 /// \brief An extensible registry for factories of ExecNodes

@@ -142,7 +142,7 @@ class JoinBenchmark {
     scheduler_ = TaskScheduler::Make();
     DCHECK_OK(join_->Init(
         ctx_.get(), settings.join_type, settings.num_threads, schema_mgr_.get(),
-        {JoinKeyCmp::EQ}, std::move(filter), [](ExecBatch) {}, [](int64_t x) {},
+        {JoinKeyCmp::EQ}, std::move(filter), [](ExecBatch) { return Status::OK(); }, [](int64_t x) { return Status::OK(); },
         register_task_group_callback, start_task_group_callback));
     scheduler_->RegisterEnd();
     DCHECK_OK(scheduler_->StartScheduling(

@@ -36,12 +36,12 @@ namespace arrow {
 namespace compute {
 
 using StartProducingFunc = std::function<Status(ExecNode*)>;
-using StopProducingFunc = std::function<void(ExecNode*)>;
+using AbortFunc = std::function<void(ExecNode*)>;
 
 // Make a dummy node that has no execution behaviour
 ARROW_TESTING_EXPORT
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
-                        int num_outputs, StartProducingFunc = {}, StopProducingFunc = {});
+                        int num_outputs, StartProducingFunc = {}, AbortFunc = {});
 
 ARROW_TESTING_EXPORT
 ExecBatch ExecBatchFromJSON(const std::vector<ValueDescr>& descrs,

@@ -65,9 +65,8 @@ struct SourceNode : ExecNode {
   [[noreturn]] static void NoInputs() {
     Unreachable("no inputs; this should never be called");
   }
-  [[noreturn]] void InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
-  [[noreturn]] void ErrorReceived(ExecNode*, Status) override { NoInputs(); }
-  [[noreturn]] void InputFinished(ExecNode*, int) override { NoInputs(); }
+  [[noreturn]] Status InputReceived(ExecNode*, ExecBatch) override { NoInputs(); }
+  [[noreturn]] Status InputFinished(ExecNode*, int) override { NoInputs(); }
 
   Status StartProducing() override {
     START_COMPUTE_SPAN(span_, std::string(kind_name()) + ":" + label(),
@@ -75,76 +74,43 @@ struct SourceNode : ExecNode {
                         {"node.label", label()},
                         {"node.output_schema", output_schema()->ToString()},
                         {"node.detail", ToString()}});
+
+    CallbackOptions opts = CallbackOptions::Defaults();
+    if(auto executor = plan_->exec_context()->executor())
     {
-      // If another exec node encountered an error during its StartProducing call
-      // it might have already called StopProducing on all of its inputs (including this
-      // node).
-      //
-      std::unique_lock<std::mutex> lock(mutex_);
-      if (stop_requested_) {
-        return Status::OK();
-      }
+        opts.should_schedule = ShouldSchedule::IfDifferentExecutor;
+        opts.executor = executor;
     }
-
-    CallbackOptions options;
-    auto executor = plan()->exec_context()->executor();
-    if (executor) {
-      // These options will transfer execution to the desired Executor if necessary.
-      // This can happen for in-memory scans where batches didn't require
-      // any CPU work to decode. Otherwise, parsing etc should have already
-      // been placed us on the desired Executor and no queues will be pushed to.
-      options.executor = executor;
-      options.should_schedule = ShouldSchedule::IfDifferentExecutor;
-    }
-    Loop([this, options] {
-      std::unique_lock<std::mutex> lock(mutex_);
-      int total_batches = batch_count_++;
-      if (stop_requested_) {
-        return Future<ControlFlow<int>>::MakeFinished(Break(total_batches));
-      }
-      lock.unlock();
-
-      return generator_().Then(
-          [=](const util::optional<ExecBatch>& maybe_batch) -> Future<ControlFlow<int>> {
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (IsIterationEnd(maybe_batch) || stop_requested_) {
-              stop_requested_ = true;
-              return Break(total_batches);
-            }
-            lock.unlock();
-            ExecBatch batch = std::move(*maybe_batch);
-            RETURN_NOT_OK(plan_->ScheduleTask([=]() {
-              outputs_[0]->InputReceived(this, std::move(batch));
-              return Status::OK();
-            }));
-            lock.lock();
-            if (!backpressure_future_.is_finished()) {
-              EVENT(span_, "Source paused due to backpressure");
-              return backpressure_future_.Then(
-                  []() -> ControlFlow<int> { return Continue(); });
-            }
-            return Future<ControlFlow<int>>::MakeFinished(Continue());
-          },
-          [=](const Status& error) -> ControlFlow<int> {
-            // NB: ErrorReceived is independent of InputFinished, but
-            // ErrorReceived will usually prompt StopProducing which will
-            // prompt InputFinished. ErrorReceived may still be called from a
-            // node which was requested to stop (indeed, the request to stop
-            // may prompt an error).
-            std::unique_lock<std::mutex> lock(mutex_);
-            stop_requested_ = true;
-            lock.unlock();
-            outputs_[0]->ErrorReceived(this, error);
-            return Break(total_batches);
-          },
-          options);
-    }).AddCallback([&](Result<int> total_batches) {
-      if (total_batches.ok()) outputs_[0]->InputFinished(this, *total_batches);
-      finished_.MarkFinished();
-    });
-    END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
+    return plan_->AddFuture(
+        VisitAsyncGenerator(generator_,
+                            [this](util::optional<ExecBatch> maybe_batch)
+                            {
+                                if(maybe_batch.has_value())
+                                {
+                                    RETURN_NOT_OK(outputs_[0]->InputReceived(this, std::move(*maybe_batch)));
+                                    batches_outputted_.fetch_add(1);
+                                }
+                                return Status::OK();
+                            }, opts).Then(
+                                [this]()
+                                {
+                                    bool expected = false;
+                                    if(complete_.compare_exchange_strong(expected, true))
+                                    {
+                                        RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(batches_outputted_.load())));
+                                        finished_.MarkFinished();
+                                    }
+                                    return Status::OK();
+                                }, {}, opts));
     return Status::OK();
   }
+
+    void Abort() override
+    {
+        bool expected = false;
+        if(complete_.compare_exchange_strong(expected, true))
+            finished_.MarkFinished();
+    }
 
   void PauseProducing(ExecNode* output, int32_t counter) override {
     std::lock_guard<std::mutex> lg(mutex_);
@@ -175,24 +141,12 @@ struct SourceNode : ExecNode {
     to_finish.MarkFinished();
   }
 
-  void StopProducing(ExecNode* output) override {
-    DCHECK_EQ(output, outputs_[0]);
-    StopProducing();
-  }
-
-  void StopProducing() override {
-    std::unique_lock<std::mutex> lock(mutex_);
-    stop_requested_ = true;
-  }
-
-  Future<> finished() override { return finished_; }
-
  private:
   std::mutex mutex_;
+  std::atomic<bool> complete_{false};
   int32_t backpressure_counter_{0};
   Future<> backpressure_future_ = Future<>::MakeFinished();
-  bool stop_requested_{false};
-  int batch_count_{0};
+  std::atomic<int64_t> batches_outputted_{0};
   AsyncGenerator<util::optional<ExecBatch>> generator_;
 };
 

@@ -98,8 +98,8 @@ class ARROW_EXPORT HashJoinSchema {
 
 class HashJoinImpl {
  public:
-  using OutputBatchCallback = std::function<void(ExecBatch)>;
-  using FinishedCallback = std::function<void(int64_t)>;
+  using OutputBatchCallback = std::function<Status(ExecBatch)>;
+  using FinishedCallback = std::function<Status(int64_t)>;
   using RegisterTaskGroupCallback = std::function<int(
       std::function<Status(size_t, int64_t)>, std::function<Status(size_t)>)>;
   using StartTaskGroupCallback = std::function<Status(int, int64_t)>;
