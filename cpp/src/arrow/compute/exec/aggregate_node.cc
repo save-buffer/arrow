@@ -314,21 +314,18 @@ class GroupByNode : public ExecNode {
         agg_kernels_(std::move(agg_kernels)),
         owned_options_(std::move(owned_options)) {}
 
-    Status Init() override
-    {
-        output_task_group_id_ = plan_->RegisterTaskGroup(
-            [this](size_t, int64_t task_id)
-            {
-                OutputNthBatch(task_id);
-                return Status::OK();
-            },
-            [this](size_t)
-            {
-                finished_.MarkFinished();
-                return Status::OK();
-            });
-        return Status::OK();
-    }
+  Status Init() override {
+    output_task_group_id_ = plan_->RegisterTaskGroup(
+        [this](size_t, int64_t task_id) {
+          OutputNthBatch(task_id);
+          return Status::OK();
+        },
+        [this](size_t) {
+          finished_.MarkFinished();
+          return Status::OK();
+        });
+    return Status::OK();
+  }
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
                                 const ExecNodeOptions& options) {

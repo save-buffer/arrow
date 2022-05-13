@@ -130,8 +130,7 @@ struct ExecPlanImpl : public ExecPlan {
       return Status::Invalid("restarted ExecPlan");
     }
 
-    for(auto &n : nodes_)
-        RETURN_NOT_OK(n->Init());
+    for (auto& n : nodes_) RETURN_NOT_OK(n->Init());
 
     task_scheduler_->RegisterEnd();
     int num_threads = 1;
