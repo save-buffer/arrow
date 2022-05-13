@@ -454,7 +454,8 @@ class TeeNode : public compute::ExecNode {
                           internal::DatasetWriter::Make(write_options));
 
     return plan->EmplaceNode<TeeNode>(plan, std::move(inputs), std::move(schema),
-                                      std::move(dataset_writer), std::move(write_options));
+                                      std::move(dataset_writer),
+                                      std::move(write_options));
   }
 
   const char* kind_name() const override { return "TeeNode"; }
@@ -497,11 +498,10 @@ class TeeNode : public compute::ExecNode {
     return outputs_[0]->InputReceived(this, std::move(result));
   }
 
-    Status InputFinished(compute::ExecNode *input, int total_batches)
-    {
-        DCHECK_EQ(input, inputs_[0]);
-        return outputs_[0]->InputFinished(input, total_batches);
-    }
+  Status InputFinished(compute::ExecNode* input, int total_batches) {
+    DCHECK_EQ(input, inputs_[0]);
+    return outputs_[0]->InputFinished(input, total_batches);
+  }
 
   void Pause() { inputs_[0]->PauseProducing(this, ++backpressure_counter_); }
 

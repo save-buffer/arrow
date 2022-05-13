@@ -73,7 +73,9 @@ struct DummyNode : ExecNode {
 
   Status InputReceived(ExecNode* input, ExecBatch batch) override { return Status::OK(); }
 
-  Status InputFinished(ExecNode* input, int total_batches) override { return Status::OK(); }
+  Status InputFinished(ExecNode* input, int total_batches) override {
+    return Status::OK();
+  }
 
   Status StartProducing() override {
     if (start_producing_) {
@@ -95,11 +97,10 @@ struct DummyNode : ExecNode {
   }
 
   void Abort() override {
-      if (abort_) {
-          abort_(this);
-      }
-      if(!finished_.is_finished())
-          finished_.MarkFinished();
+    if (abort_) {
+      abort_(this);
+    }
+    if (!finished_.is_finished()) finished_.MarkFinished();
   }
 
  private:
@@ -123,9 +124,8 @@ struct DummyNode : ExecNode {
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
                         int num_outputs, StartProducingFunc start_producing,
                         AbortFunc abort) {
-  auto node =
-      plan->EmplaceNode<DummyNode>(plan, std::move(inputs), num_outputs,
-                                   std::move(start_producing), std::move(abort));
+  auto node = plan->EmplaceNode<DummyNode>(plan, std::move(inputs), num_outputs,
+                                           std::move(start_producing), std::move(abort));
   if (!label.empty()) {
     node->SetLabel(std::move(label));
   }

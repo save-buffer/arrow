@@ -41,7 +41,8 @@ class ProjectNode : public ExecNode {
  public:
   ProjectNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
               std::shared_ptr<Schema> output_schema, std::vector<Expression> exprs)
-      : ExecNode(plan, std::move(inputs), {"target"}, std::move(output_schema), /*num_outputs=*/1),
+      : ExecNode(plan, std::move(inputs), {"target"}, std::move(output_schema),
+                 /*num_outputs=*/1),
         exprs_(std::move(exprs)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -70,7 +71,6 @@ class ProjectNode : public ExecNode {
     }
     return plan->EmplaceNode<ProjectNode>(plan, std::move(inputs),
                                           schema(std::move(fields)), std::move(exprs));
-
   }
 
   const char* kind_name() const override { return "ProjectNode"; }
@@ -95,23 +95,22 @@ class ProjectNode : public ExecNode {
   Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
-      util::tracing::Span span;
-      START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
-                                     {{"project", ToStringExtra()},
-                                      {"node.label", label()},
-                                      {"batch.length", batch.length}});
-      ARROW_ASSIGN_OR_RAISE(auto result, DoProject(std::move(batch)));
-      END_SPAN(span);
-      return outputs_[0]->InputReceived(this, std::move(result));
+    util::tracing::Span span;
+    START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
+                                   {{"project", ToStringExtra()},
+                                    {"node.label", label()},
+                                    {"batch.length", batch.length}});
+    ARROW_ASSIGN_OR_RAISE(auto result, DoProject(std::move(batch)));
+    END_SPAN(span);
+    return outputs_[0]->InputReceived(this, std::move(result));
   }
 
-    Status InputFinished(ExecNode *input, int total_batches) override
-    {
-        DCHECK_EQ(input, inputs_[0]);
-        RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches));
-        finished_.MarkFinished();
-        return Status::OK();
-    }
+  Status InputFinished(ExecNode* input, int total_batches) override {
+    DCHECK_EQ(input, inputs_[0]);
+    RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches));
+    finished_.MarkFinished();
+    return Status::OK();
+  }
 
  protected:
   std::string ToStringExtra(int indent = 0) const override {

@@ -307,7 +307,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
     // This can happen if an error was received and the source hasn't yet stopped.  Since
     // we have already called consumer_->Finish we don't want to call consumer_->Consume
     if (input_counter_.Completed()) {
-        return Status::OK();
+      return Status::OK();
     }
 
     RETURN_NOT_OK(consumer_->Consume(std::move(batch)));
@@ -328,10 +328,7 @@ class ConsumingSinkNode : public ExecNode, public BackpressureControl {
  protected:
   virtual Status Finish() {
     auto fut = consumer_->Finish();
-    fut.AddCallback([this](const Status &)
-    {
-        finished_.MarkFinished();
-    });
+    fut.AddCallback([this](const Status&) { finished_.MarkFinished(); });
     return plan_->AddFuture(std::move(fut));
   }
 
@@ -469,12 +466,13 @@ struct OrderBySinkNode final : public SinkNode {
 
     DCHECK_EQ(input, inputs_[0]);
 
-    ARROW_ASSIGN_OR_RAISE(auto result, batch.ToRecordBatch(inputs_[0]->output_schema(),
-                                                           plan()->exec_context()->memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(auto result,
+                          batch.ToRecordBatch(inputs_[0]->output_schema(),
+                                              plan()->exec_context()->memory_pool()));
     impl_->InputReceived(std::move(result));
 
     if (input_counter_.Increment()) {
-        return Finish();
+      return Finish();
     }
     return Status::OK();
   }

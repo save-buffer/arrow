@@ -38,7 +38,8 @@ class FilterNode : public ExecNode {
  public:
   FilterNode(ExecPlan* plan, std::vector<ExecNode*> inputs,
              std::shared_ptr<Schema> output_schema, Expression filter)
-      : ExecNode(plan, std::move(inputs), {"target"}, std::move(output_schema), /*num_outputs=*/1),
+      : ExecNode(plan, std::move(inputs), {"target"}, std::move(output_schema),
+                 /*num_outputs=*/1),
         filter_(std::move(filter)) {}
 
   static Result<ExecNode*> Make(ExecPlan* plan, std::vector<ExecNode*> inputs,
@@ -111,13 +112,12 @@ class FilterNode : public ExecNode {
     return outputs_[0]->InputReceived(this, std::move(result));
   }
 
-    Status InputFinished(ExecNode *input, int total_batches) override
-    {
-        DCHECK_EQ(input, inputs_[0]);
-        RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches));
-        finished_.MarkFinished();
-        return Status::OK();
-    }
+  Status InputFinished(ExecNode* input, int total_batches) override {
+    DCHECK_EQ(input, inputs_[0]);
+    RETURN_NOT_OK(outputs_[0]->InputFinished(this, total_batches));
+    finished_.MarkFinished();
+    return Status::OK();
+  }
 
  protected:
   std::string ToStringExtra(int indent = 0) const override {

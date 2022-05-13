@@ -231,8 +231,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   Status ProbeBatch_OutputOne(int64_t batch_size_next, ExecBatch* opt_left_key,
-                            ExecBatch* opt_left_payload, ExecBatch* opt_right_key,
-                            ExecBatch* opt_right_payload) {
+                              ExecBatch* opt_left_payload, ExecBatch* opt_right_key,
+                              ExecBatch* opt_right_payload) {
     ExecBatch result({}, batch_size_next);
     int num_out_cols_left =
         schema_mgr_->proj_maps[0].num_cols(HashJoinProjection::OUTPUT);
@@ -458,9 +458,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
     }
 
     return ProbeBatch_OutputOne(batch_size_next, has_left ? &left_key : nullptr,
-                         has_left_payload ? &left_payload : nullptr,
-                         has_right ? &right_key : nullptr,
-                         has_right_payload ? &right_payload : nullptr);
+                                has_left_payload ? &left_payload : nullptr,
+                                has_right ? &right_key : nullptr,
+                                has_right_payload ? &right_payload : nullptr);
   }
 
   Status ProbeBatch_OutputAll(size_t thread_index, const RowEncoder& exec_batch_keys,

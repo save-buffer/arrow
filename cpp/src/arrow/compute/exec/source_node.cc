@@ -76,41 +76,39 @@ struct SourceNode : ExecNode {
                         {"node.detail", ToString()}});
 
     CallbackOptions opts = CallbackOptions::Defaults();
-    if(auto executor = plan_->exec_context()->executor())
-    {
-        opts.should_schedule = ShouldSchedule::IfDifferentExecutor;
-        opts.executor = executor;
+    if (auto executor = plan_->exec_context()->executor()) {
+      opts.should_schedule = ShouldSchedule::IfDifferentExecutor;
+      opts.executor = executor;
     }
     return plan_->AddFuture(
-        VisitAsyncGenerator(generator_,
-                            [this](util::optional<ExecBatch> maybe_batch)
-                            {
-                                if(maybe_batch.has_value())
-                                {
-                                    RETURN_NOT_OK(outputs_[0]->InputReceived(this, std::move(*maybe_batch)));
-                                    batches_outputted_.fetch_add(1);
-                                }
-                                return Status::OK();
-                            }, opts).Then(
-                                [this]()
-                                {
-                                    bool expected = false;
-                                    if(complete_.compare_exchange_strong(expected, true))
-                                    {
-                                        RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(batches_outputted_.load())));
-                                        finished_.MarkFinished();
-                                    }
-                                    return Status::OK();
-                                }, {}, opts));
+        VisitAsyncGenerator(
+            generator_,
+            [this](util::optional<ExecBatch> maybe_batch) {
+              if (maybe_batch.has_value()) {
+                RETURN_NOT_OK(outputs_[0]->InputReceived(this, std::move(*maybe_batch)));
+                batches_outputted_.fetch_add(1);
+              }
+              return Status::OK();
+            },
+            opts)
+            .Then(
+                [this]() {
+                  bool expected = false;
+                  if (complete_.compare_exchange_strong(expected, true)) {
+                    RETURN_NOT_OK(outputs_[0]->InputFinished(
+                        this, static_cast<int>(batches_outputted_.load())));
+                    finished_.MarkFinished();
+                  }
+                  return Status::OK();
+                },
+                {}, opts));
     return Status::OK();
   }
 
-    void Abort() override
-    {
-        bool expected = false;
-        if(complete_.compare_exchange_strong(expected, true))
-            finished_.MarkFinished();
-    }
+  void Abort() override {
+    bool expected = false;
+    if (complete_.compare_exchange_strong(expected, true)) finished_.MarkFinished();
+  }
 
   void PauseProducing(ExecNode* output, int32_t counter) override {
     std::lock_guard<std::mutex> lg(mutex_);

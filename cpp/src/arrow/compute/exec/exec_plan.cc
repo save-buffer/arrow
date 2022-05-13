@@ -78,24 +78,22 @@ struct ExecPlanImpl : public ExecPlan {
     return nodes_.back().get();
   }
 
-    Status AddFuture(Future<> fut)
-    {
-        fut.AddCallback([this](const Status &status)
-        {
-            if(!status.ok())
-            {
-                std::lock_guard<std::mutex> guard(abort_mutex_);
-                errors_.emplace_back(std::move(status));
-                AbortUnlocked();
-            }
-        });
-        return task_group_.AddTaskIfNotEnded(std::move(fut));
-    }
+  Status AddFuture(Future<> fut) {
+    fut.AddCallback([this](const Status& status) {
+      if (!status.ok()) {
+        std::lock_guard<std::mutex> guard(abort_mutex_);
+        errors_.emplace_back(std::move(status));
+        AbortUnlocked();
+      }
+    });
+    return task_group_.AddTaskIfNotEnded(std::move(fut));
+  }
 
   Status ScheduleTask(std::function<Status()> fn) {
     auto executor = exec_context_->executor();
     if (!executor) return fn();
-    ARROW_ASSIGN_OR_RAISE(auto task_fut, executor->Submit(stop_source_.token(), std::move(fn)));
+    ARROW_ASSIGN_OR_RAISE(auto task_fut,
+                          executor->Submit(stop_source_.token(), std::move(fn)));
     return AddFuture(std::move(task_fut));
   }
 
@@ -141,10 +139,9 @@ struct ExecPlanImpl : public ExecPlan {
       return Status::Invalid("restarted ExecPlan");
     }
     std::vector<Future<>> futures;
-    for (auto& n : nodes_)
-    {
-        RETURN_NOT_OK(n->Init());
-        futures.push_back(n->finished());
+    for (auto& n : nodes_) {
+      RETURN_NOT_OK(n->Init());
+      futures.push_back(n->finished());
     }
     task_scheduler_->RegisterEnd();
     int num_threads = 1;
@@ -163,26 +160,18 @@ struct ExecPlanImpl : public ExecPlan {
     // producers precede consumers
     sorted_nodes_ = TopoSort();
 
-    AllFinished(futures).AddCallback(
-        [this](const Status&)
-        {
-            if(!aborted_)
-                std::ignore = task_group_.End();
-        });
+    AllFinished(futures).AddCallback([this](const Status&) {
+      if (!aborted_) std::ignore = task_group_.End();
+    });
 
-    task_group_.OnFinished().AddCallback(
-        [this](const Status&)
-        {
-            Status st = Status::OK();
-            if(aborted_)
-            {
-                for(const auto &n : nodes_)
-                    n->Abort();
-                if(!errors_.empty())
-                    st = std::move(errors_.front());
-            }
-            finished_.MarkFinished(std::move(st));
-        });
+    task_group_.OnFinished().AddCallback([this](const Status&) {
+      Status st = Status::OK();
+      if (aborted_) {
+        for (const auto& n : nodes_) n->Abort();
+        if (!errors_.empty()) st = std::move(errors_.front());
+      }
+      finished_.MarkFinished(std::move(st));
+    });
 
     started_ = true;
     Status st = Status::OK();
@@ -195,34 +184,30 @@ struct ExecPlanImpl : public ExecPlan {
       st = node->StartProducing();
       EVENT(span_, "StartProducing:" + node->label(), {{"status", st.ToString()}});
       if (!st.ok()) {
-          Abort();
-          return st;
+        Abort();
+        return st;
       }
     }
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return st;
   }
 
-    void Abort()
-    {
-        if(finished_.is_finished())
-            return;
-        std::lock_guard<std::mutex> guard(abort_mutex_);
-        AbortUnlocked();
-    }
+  void Abort() {
+    if (finished_.is_finished()) return;
+    std::lock_guard<std::mutex> guard(abort_mutex_);
+    AbortUnlocked();
+  }
 
-    void AbortUnlocked()
-    {
-        if(!aborted_)
-        {
-            aborted_ = true;
-            DCHECK(started_) << "aborted an ExecPlan which never started";
-            EVENT(span_, "Abort");
+  void AbortUnlocked() {
+    if (!aborted_) {
+      aborted_ = true;
+      DCHECK(started_) << "aborted an ExecPlan which never started";
+      EVENT(span_, "Abort");
 
-            stop_source_.RequestStop();
-            task_scheduler_->Abort([this]() { std::ignore = task_group_.End(); });
-        }
+      stop_source_.RequestStop();
+      task_scheduler_->Abort([this]() { std::ignore = task_group_.End(); });
     }
+  }
 
   NodeVector TopoSort() const {
     struct Impl {

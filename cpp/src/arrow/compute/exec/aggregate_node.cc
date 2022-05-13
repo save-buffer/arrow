@@ -298,9 +298,7 @@ class GroupByNode : public ExecNode {
 
   Status Init() override {
     output_task_group_id_ = plan_->RegisterTaskGroup(
-        [this](size_t, int64_t task_id) {
-          return OutputNthBatch(task_id);
-        },
+        [this](size_t, int64_t task_id) { return OutputNthBatch(task_id); },
         [this](size_t) {
           finished_.MarkFinished();
           return Status::OK();
@@ -537,7 +535,7 @@ class GroupByNode : public ExecNode {
     RETURN_NOT_OK(Consume(std::move(batch)));
 
     if (input_counter_.Increment()) {
-        RETURN_NOT_OK(OutputResult());
+      RETURN_NOT_OK(OutputResult());
     }
     return Status::OK();
   }
@@ -545,7 +543,8 @@ class GroupByNode : public ExecNode {
   Status InputFinished(ExecNode* input, int total_batches) override {
     EVENT(span_, "InputFinished", {{"batches.length", total_batches}});
 
-    if (finished_.is_finished()) return Status::OK();;
+    if (finished_.is_finished()) return Status::OK();
+    ;
 
     DCHECK_EQ(input, inputs_[0]);
 

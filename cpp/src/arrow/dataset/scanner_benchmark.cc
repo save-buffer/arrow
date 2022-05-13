@@ -134,10 +134,9 @@ void MinimalEndToEndScan(size_t num_batches, size_t batch_size) {
       compute::MakeExecNode("scan", plan.get(), {}, ScanNodeOptions{dataset, options}));
 
   // pipe the scan node into a filter node
-  ASSERT_OK_AND_ASSIGN(
-      compute::ExecNode * filter,
-      compute::MakeExecNode("filter", plan.get(), {scan},
-                            compute::FilterNodeOptions{b_is_true}));
+  ASSERT_OK_AND_ASSIGN(compute::ExecNode * filter,
+                       compute::MakeExecNode("filter", plan.get(), {scan},
+                                             compute::FilterNodeOptions{b_is_true}));
 
   // pipe the filter node into a project node
   // NB: we're using the project node factory which preserves fragment/batch index
@@ -189,10 +188,10 @@ static const std::vector<int32_t> kWorkload = {100, 1000, 10000, 100000};
 static void MinimalEndToEnd_Customize(benchmark::internal::Benchmark* b) {
   for (const int32_t num_batches : kWorkload) {
     for (const int batch_size : {10, 100, 1000}) {
-        b->Args({num_batches, batch_size});
-        RecordBatchVector batches =
-            ::arrow::compute::GenerateBatches(GetSchema(), num_batches, batch_size);
-        StoreBatches(num_batches, batch_size, batches);
+      b->Args({num_batches, batch_size});
+      RecordBatchVector batches =
+          ::arrow::compute::GenerateBatches(GetSchema(), num_batches, batch_size);
+      StoreBatches(num_batches, batch_size, batches);
     }
   }
   b->ArgNames({"num_batches", "batch_size"});

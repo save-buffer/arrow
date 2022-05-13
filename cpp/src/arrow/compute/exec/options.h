@@ -98,8 +98,7 @@ class ARROW_EXPORT ProjectNodeOptions : public ExecNodeOptions {
  public:
   explicit ProjectNodeOptions(std::vector<Expression> expressions,
                               std::vector<std::string> names = {})
-      : expressions(std::move(expressions)),
-        names(std::move(names)) {}
+      : expressions(std::move(expressions)), names(std::move(names)) {}
 
   std::vector<Expression> expressions;
   std::vector<std::string> names;

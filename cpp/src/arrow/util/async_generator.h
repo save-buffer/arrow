@@ -85,7 +85,8 @@ Future<T> AsyncGeneratorEnd() {
 
 /// returning a future that completes when all have been visited
 template <typename T, typename Visitor>
-Future<> VisitAsyncGenerator(AsyncGenerator<T> generator, Visitor visitor, CallbackOptions options = CallbackOptions::Defaults()) {
+Future<> VisitAsyncGenerator(AsyncGenerator<T> generator, Visitor visitor,
+                             CallbackOptions options = CallbackOptions::Defaults()) {
   struct LoopBody {
     struct Callback {
       Result<ControlFlow<>> operator()(const T& next) {

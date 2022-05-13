@@ -238,10 +238,8 @@ class ARROW_EXPORT ExecNode {
   /// This may be called any number of times after StartProducing() succeeds.
   /// However, the node is still free to produce data (which may be difficult
   /// to prevent anyway if data is produced using multiple threads).
-  virtual void PauseProducing(ExecNode* output, int32_t counter)
-  {
-      for(auto &n : inputs_)
-          n->PauseProducing(this, counter);
+  virtual void PauseProducing(ExecNode* output, int32_t counter) {
+    for (auto& n : inputs_) n->PauseProducing(this, counter);
   }
 
   /// \brief Resume producing after a temporary pause
@@ -252,13 +250,13 @@ class ARROW_EXPORT ExecNode {
   /// This call is a hint that an output node is willing to receive data again.
   ///
   /// This may be called any number of times after StartProducing() succeeds.
-  virtual void ResumeProducing(ExecNode* output, int32_t counter)
-  {
-      for(auto &n : inputs_)
-          n->ResumeProducing(this, counter);
+  virtual void ResumeProducing(ExecNode* output, int32_t counter) {
+    for (auto& n : inputs_) n->ResumeProducing(this, counter);
   }
 
-  virtual void Abort() { if(!finished_.is_finished()) finished_.MarkFinished(); }
+  virtual void Abort() {
+    if (!finished_.is_finished()) finished_.MarkFinished();
+  }
 
   /// \brief A future which will be marked finished when this node has stopped producing.
   virtual Future<> finished() { return finished_; }

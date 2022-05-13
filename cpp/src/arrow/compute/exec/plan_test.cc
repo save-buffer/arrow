@@ -185,9 +185,9 @@ TEST(ExecPlan, DummyStartProducingError) {
       MakeDummyNode(plan.get(), "source2", /*num_inputs=*/{}, /*num_outputs=*/1,
                     t.start_producing_func(), t.abort_func());
 
-  auto process1 = MakeDummyNode(
-      plan.get(), "process1", /*num_inputs=*/{source1}, /*num_outputs=*/2,
-      t.start_producing_func(Status::IOError("xxx")), t.abort_func());
+  auto process1 =
+      MakeDummyNode(plan.get(), "process1", /*num_inputs=*/{source1}, /*num_outputs=*/2,
+                    t.start_producing_func(Status::IOError("xxx")), t.abort_func());
 
   auto process2 =
       MakeDummyNode(plan.get(), "process2", /*num_inputs=*/{process1, source2},
@@ -209,7 +209,8 @@ TEST(ExecPlan, DummyStartProducingError) {
   ASSERT_THAT(t.started, ElementsAre("sink", "process3", "process2", "process1"));
   ASSERT_FINISHES_OK(plan->finished());
   // Asser that all nodes are aborted
-  ASSERT_THAT(t.aborted, ElementsAre( "source1", "source2", "process1", "process2", "process3", "sink"));
+  ASSERT_THAT(t.aborted, ElementsAre("source1", "source2", "process1", "process2",
+                                     "process3", "sink"));
 }
 
 TEST(ExecPlanExecution, SourceSink) {

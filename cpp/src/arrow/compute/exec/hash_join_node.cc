@@ -553,7 +553,9 @@ class HashJoinNode : public ExecNode {
     RETURN_NOT_OK(impl_->Init(
         plan_->exec_context(), join_type_, num_threads, schema_mgr_.get(), key_cmp_,
         filter_, [this](ExecBatch batch) { return this->OutputBatchCallback(batch); },
-        [this](int64_t total_num_batches) { return this->FinishedCallback(total_num_batches); },
+        [this](int64_t total_num_batches) {
+          return this->FinishedCallback(total_num_batches);
+        },
         [this](std::function<Status(size_t, int64_t)> task,
                std::function<Status(size_t)> on_finished) {
           return plan_->RegisterTaskGroup(std::move(task), std::move(on_finished));
@@ -598,7 +600,8 @@ class HashJoinNode : public ExecNode {
   Status FinishedCallback(int64_t total_num_batches) {
     bool expected = false;
     if (complete_.compare_exchange_strong(expected, true)) {
-      RETURN_NOT_OK(outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches)));
+      RETURN_NOT_OK(
+          outputs_[0]->InputFinished(this, static_cast<int>(total_num_batches)));
       finished_.MarkFinished();
     }
     return Status::OK();
