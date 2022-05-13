@@ -129,7 +129,9 @@ struct ExecPlanImpl : public ExecPlan {
     if (started_) {
       return Status::Invalid("restarted ExecPlan");
     }
-    started_ = true;
+
+    for(auto &n : nodes_)
+        RETURN_NOT_OK(n->Init());
 
     task_scheduler_->RegisterEnd();
     int num_threads = 1;
@@ -145,6 +147,7 @@ struct ExecPlanImpl : public ExecPlan {
         },
         /*concurrent_tasks=*/2 * num_threads, sync_execution));
 
+    started_ = true;
     // producers precede consumers
     sorted_nodes_ = TopoSort();
 

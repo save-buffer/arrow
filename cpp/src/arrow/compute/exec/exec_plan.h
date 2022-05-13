@@ -169,6 +169,8 @@ class ARROW_EXPORT ExecNode {
   /// knows when it has received all input, regardless of order.
   virtual void InputFinished(ExecNode* input, int total_batches) = 0;
 
+  virtual Status Init() { return Status::OK(); };
+
   /// Lifecycle API:
   /// - start / stop to initiate and terminate production
   /// - pause / resume to apply backpressure
