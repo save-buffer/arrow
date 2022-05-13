@@ -100,16 +100,15 @@ class HashJoinImpl {
  public:
   using OutputBatchCallback = std::function<void(ExecBatch)>;
   using FinishedCallback = std::function<void(int64_t)>;
-  using RegisterTaskGroupCallback = std::function<
-      int(std::function<Status(size_t, int64_t)>, std::function<Status(size_t)>)>;
+  using RegisterTaskGroupCallback = std::function<int(
+      std::function<Status(size_t, int64_t)>, std::function<Status(size_t)>)>;
   using StartTaskGroupCallback = std::function<Status(int, int64_t)>;
   using AbortContinuationImpl = std::function<void()>;
 
   virtual ~HashJoinImpl() = default;
-  virtual Status Init(ExecContext* ctx, JoinType join_type,
-                      size_t num_threads, HashJoinSchema* schema_mgr,
-                      std::vector<JoinKeyCmp> key_cmp, Expression filter,
-                      OutputBatchCallback output_batch_callback,
+  virtual Status Init(ExecContext* ctx, JoinType join_type, size_t num_threads,
+                      HashJoinSchema* schema_mgr, std::vector<JoinKeyCmp> key_cmp,
+                      Expression filter, OutputBatchCallback output_batch_callback,
                       FinishedCallback finished_callback,
                       RegisterTaskGroupCallback register_task_group_callback,
                       StartTaskGroupCallback start_task_group_callback) = 0;

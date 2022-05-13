@@ -97,54 +97,51 @@ struct SourceNode : ExecNode {
       options.should_schedule = ShouldSchedule::IfDifferentExecutor;
     }
     Loop([this, options] {
-                  std::unique_lock<std::mutex> lock(mutex_);
-                  int total_batches = batch_count_++;
-                  if (stop_requested_) {
-                    return Future<ControlFlow<int>>::MakeFinished(Break(total_batches));
-                  }
-                  lock.unlock();
+      std::unique_lock<std::mutex> lock(mutex_);
+      int total_batches = batch_count_++;
+      if (stop_requested_) {
+        return Future<ControlFlow<int>>::MakeFinished(Break(total_batches));
+      }
+      lock.unlock();
 
-                  return generator_().Then(
-                      [=](const util::optional<ExecBatch>& maybe_batch)
-                          -> Future<ControlFlow<int>> {
-                        std::unique_lock<std::mutex> lock(mutex_);
-                        if (IsIterationEnd(maybe_batch) || stop_requested_) {
-                          stop_requested_ = true;
-                          return Break(total_batches);
-                        }
-                        lock.unlock();
-                        ExecBatch batch = std::move(*maybe_batch);
-                        RETURN_NOT_OK(plan_->ScheduleTask([=]()
-                        {
-                            outputs_[0]->InputReceived(this, std::move(batch));
-                            return Status::OK();
-                        }));
-                        lock.lock();
-                        if (!backpressure_future_.is_finished()) {
-                          EVENT(span_, "Source paused due to backpressure");
-                          return backpressure_future_.Then(
-                              []() -> ControlFlow<int> { return Continue(); });
-                        }
-                        return Future<ControlFlow<int>>::MakeFinished(Continue());
-                      },
-                      [=](const Status& error) -> ControlFlow<int> {
-                        // NB: ErrorReceived is independent of InputFinished, but
-                        // ErrorReceived will usually prompt StopProducing which will
-                        // prompt InputFinished. ErrorReceived may still be called from a
-                        // node which was requested to stop (indeed, the request to stop
-                        // may prompt an error).
-                        std::unique_lock<std::mutex> lock(mutex_);
-                        stop_requested_ = true;
-                        lock.unlock();
-                        outputs_[0]->ErrorReceived(this, error);
-                        return Break(total_batches);
-                      },
-                      options);
-                }).AddCallback([&](Result<int> total_batches) {
-                    if(total_batches.ok())
-                        outputs_[0]->InputFinished(this, *total_batches);
-                    finished_.MarkFinished();
-                });
+      return generator_().Then(
+          [=](const util::optional<ExecBatch>& maybe_batch) -> Future<ControlFlow<int>> {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (IsIterationEnd(maybe_batch) || stop_requested_) {
+              stop_requested_ = true;
+              return Break(total_batches);
+            }
+            lock.unlock();
+            ExecBatch batch = std::move(*maybe_batch);
+            RETURN_NOT_OK(plan_->ScheduleTask([=]() {
+              outputs_[0]->InputReceived(this, std::move(batch));
+              return Status::OK();
+            }));
+            lock.lock();
+            if (!backpressure_future_.is_finished()) {
+              EVENT(span_, "Source paused due to backpressure");
+              return backpressure_future_.Then(
+                  []() -> ControlFlow<int> { return Continue(); });
+            }
+            return Future<ControlFlow<int>>::MakeFinished(Continue());
+          },
+          [=](const Status& error) -> ControlFlow<int> {
+            // NB: ErrorReceived is independent of InputFinished, but
+            // ErrorReceived will usually prompt StopProducing which will
+            // prompt InputFinished. ErrorReceived may still be called from a
+            // node which was requested to stop (indeed, the request to stop
+            // may prompt an error).
+            std::unique_lock<std::mutex> lock(mutex_);
+            stop_requested_ = true;
+            lock.unlock();
+            outputs_[0]->ErrorReceived(this, error);
+            return Break(total_batches);
+          },
+          options);
+    }).AddCallback([&](Result<int> total_batches) {
+      if (total_batches.ok()) outputs_[0]->InputFinished(this, *total_batches);
+      finished_.MarkFinished();
+    });
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
   }

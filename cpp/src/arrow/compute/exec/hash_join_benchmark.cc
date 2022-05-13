@@ -113,9 +113,8 @@ class JoinBenchmark {
 
     stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
 
-    ctx_ = arrow::internal::make_unique<ExecContext>(
-        default_memory_pool(),
-        arrow::internal::GetCpuThreadPool());
+    ctx_ = arrow::internal::make_unique<ExecContext>(default_memory_pool(),
+                                                     arrow::internal::GetCpuThreadPool());
 
     schema_mgr_ = arrow::internal::make_unique<HashJoinSchema>();
     Expression filter = literal(true);
@@ -131,27 +130,25 @@ class JoinBenchmark {
       return Status::OK();
     };
 
-    auto register_task_group_callback = [&](std::function<Status(size_t, int64_t)> task, std::function<Status(size_t)> cont)
-    {
-        return scheduler_->RegisterTaskGroup(std::move(task), std::move(cont));
+    auto register_task_group_callback = [&](std::function<Status(size_t, int64_t)> task,
+                                            std::function<Status(size_t)> cont) {
+      return scheduler_->RegisterTaskGroup(std::move(task), std::move(cont));
     };
-    
-    auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks)
-    {
-        return scheduler_->StartTaskGroup(omp_get_thread_num(), task_group_id, num_tasks);
+
+    auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks) {
+      return scheduler_->StartTaskGroup(omp_get_thread_num(), task_group_id, num_tasks);
     };
 
     scheduler_ = TaskScheduler::Make();
     DCHECK_OK(join_->Init(
-        ctx_.get(), settings.join_type, settings.num_threads,
-        schema_mgr_.get(), {JoinKeyCmp::EQ}, std::move(filter), [](ExecBatch) {},
-        [](int64_t x) {}, register_task_group_callback, start_task_group_callback));
+        ctx_.get(), settings.join_type, settings.num_threads, schema_mgr_.get(),
+        {JoinKeyCmp::EQ}, std::move(filter), [](ExecBatch) {}, [](int64_t x) {},
+        register_task_group_callback, start_task_group_callback));
     scheduler_->RegisterEnd();
     DCHECK_OK(scheduler_->StartScheduling(
-                  /*thread_index=*/0,
-                  schedule_callback,
-                  /*concurrent_tasks=*/2 * settings.num_threads,
-                  /*sync_execution=*/settings.num_threads == 1));
+        /*thread_index=*/0, schedule_callback,
+        /*concurrent_tasks=*/2 * settings.num_threads,
+        /*sync_execution=*/settings.num_threads == 1));
   }
 
   void RunJoin() {

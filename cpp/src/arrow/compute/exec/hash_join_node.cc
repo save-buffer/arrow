@@ -579,17 +579,15 @@ class HashJoinNode : public ExecNode {
 
     size_t num_threads = plan_->thread_capacity();
     RETURN_NOT_OK(impl_->Init(
-        plan_->exec_context(), join_type_, num_threads,
-        schema_mgr_.get(), key_cmp_, filter_,
-        [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
+        plan_->exec_context(), join_type_, num_threads, schema_mgr_.get(), key_cmp_,
+        filter_, [this](ExecBatch batch) { this->OutputBatchCallback(batch); },
         [this](int64_t total_num_batches) { this->FinishedCallback(total_num_batches); },
-        [this](std::function<Status(size_t, int64_t)> task, std::function<Status(size_t)> on_finished)
-        {
-            return plan_->RegisterTaskGroup(std::move(task), std::move(on_finished));
+        [this](std::function<Status(size_t, int64_t)> task,
+               std::function<Status(size_t)> on_finished) {
+          return plan_->RegisterTaskGroup(std::move(task), std::move(on_finished));
         },
-        [this](int task_group_id, int64_t num_tasks)
-        {
-            return plan_->StartTaskGroup(task_group_id, num_tasks);
+        [this](int task_group_id, int64_t num_tasks) {
+          return plan_->StartTaskGroup(task_group_id, num_tasks);
         }));
     return Status::OK();
   }
@@ -632,7 +630,7 @@ class HashJoinNode : public ExecNode {
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
-      return plan_->ScheduleTask(std::move(func));
+    return plan_->ScheduleTask(std::move(func));
   }
 
  private:

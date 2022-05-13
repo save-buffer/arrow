@@ -82,10 +82,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
     return Status::OK();
   }
 
-  Status Init(ExecContext* ctx, JoinType join_type,
-              size_t num_threads, HashJoinSchema* schema_mgr,
-              std::vector<JoinKeyCmp> key_cmp, Expression filter,
-              OutputBatchCallback output_batch_callback,
+  Status Init(ExecContext* ctx, JoinType join_type, size_t num_threads,
+              HashJoinSchema* schema_mgr, std::vector<JoinKeyCmp> key_cmp,
+              Expression filter, OutputBatchCallback output_batch_callback,
               FinishedCallback finished_callback,
               RegisterTaskGroupCallback register_task_group_callback,
               StartTaskGroupCallback start_task_group_callback) override {
@@ -677,8 +676,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   Status BuildHashTable() {
-    return start_task_group_callback_(task_group_build_,
-                                      BuildHashTable_num_tasks());
+    return start_task_group_callback_(task_group_build_, BuildHashTable_num_tasks());
   }
 
   int64_t ProbeQueuedBatches_num_tasks() {
@@ -723,8 +721,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   Status ProbeQueuedBatches() {
-    return start_task_group_callback_(task_group_queued_,
-                                      ProbeQueuedBatches_num_tasks());
+    return start_task_group_callback_(task_group_queued_, ProbeQueuedBatches_num_tasks());
   }
 
   int64_t ScanHashTable_num_tasks() {
@@ -803,8 +800,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
 
   Status ScanHashTable() {
     MergeHasMatch();
-    return start_task_group_callback_(task_group_scan_,
-                                      ScanHashTable_num_tasks());
+    return start_task_group_callback_(task_group_scan_, ScanHashTable_num_tasks());
   }
 
   bool QueueBatchIfNeeded(int side, ExecBatch batch) {
@@ -824,9 +820,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
 
   Status OnRightSideFinished() { return BuildHashTable(); }
 
-  Status OnLeftSideAndQueueFinished() {
-    return ScanHashTable();
-  }
+  Status OnLeftSideAndQueueFinished() { return ScanHashTable(); }
 
   void InitHasMatchIfNeeded(ThreadLocalState* local_state) {
     if (local_state->is_has_match_initialized) {

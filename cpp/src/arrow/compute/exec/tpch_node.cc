@@ -2711,7 +2711,8 @@ class PartGenerator : public TpchTableGenerator {
  private:
   Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
-    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextPartBatch(thread_index));
+    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch,
+                          gen_->NextPartBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->part_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
@@ -3091,7 +3092,8 @@ class OrdersGenerator : public TpchTableGenerator {
  private:
   Status ProduceCallback(size_t thread_index) {
     if (done_.load()) return Status::OK();
-    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch, gen_->NextOrdersBatch(thread_index));
+    ARROW_ASSIGN_OR_RAISE(util::optional<ExecBatch> maybe_batch,
+                          gen_->NextOrdersBatch(thread_index));
     if (!maybe_batch.has_value()) {
       int64_t batches_generated = gen_->orders_batches_generated();
       if (batches_generated == batches_outputted_.load()) {
@@ -3397,7 +3399,7 @@ class TpchNode : public ExecNode {
   }
 
   void StopProducing() override {
-    if(generator_->Abort()) finished_.MarkFinished();
+    if (generator_->Abort()) finished_.MarkFinished();
   }
 
   Future<> finished() override { return finished_; }
@@ -3413,18 +3415,15 @@ class TpchNode : public ExecNode {
   }
 
   Status ScheduleTaskCallback(std::function<Status(size_t)> func) {
-      if(finished_.is_finished())
-          return Status::OK();
-      return plan_->ScheduleTask([this, func](size_t thread_index)
-      {
-          Status status = func(thread_index);
-          if(!status.ok())
-          {
-              StopProducing();
-              ErrorIfNotOk(status);
-          }
-          return status;
-      });
+    if (finished_.is_finished()) return Status::OK();
+    return plan_->ScheduleTask([this, func](size_t thread_index) {
+      Status status = func(thread_index);
+      if (!status.ok()) {
+        StopProducing();
+        ErrorIfNotOk(status);
+      }
+      return status;
+    });
   }
 
   const char* name_;
