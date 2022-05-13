@@ -96,7 +96,7 @@ struct SourceNode : ExecNode {
       options.executor = executor;
       options.should_schedule = ShouldSchedule::IfDifferentExecutor;
     }
-    finished_ = Loop([this, executor, options] {
+    Loop([this, options] {
                   std::unique_lock<std::mutex> lock(mutex_);
                   int total_batches = batch_count_++;
                   if (stop_requested_) {
@@ -114,22 +114,11 @@ struct SourceNode : ExecNode {
                         }
                         lock.unlock();
                         ExecBatch batch = std::move(*maybe_batch);
-
-                        if (executor) {
-                          auto status = task_group_.AddTask(
-                              [this, executor, batch]() -> Result<Future<>> {
-                                return executor->Submit([=]() {
-                                  outputs_[0]->InputReceived(this, std::move(batch));
-                                  return Status::OK();
-                                });
-                              });
-                          if (!status.ok()) {
-                            outputs_[0]->ErrorReceived(this, std::move(status));
-                            return Break(total_batches);
-                          }
-                        } else {
-                          outputs_[0]->InputReceived(this, std::move(batch));
-                        }
+                        RETURN_NOT_OK(plan_->ScheduleTask([=]()
+                        {
+                            outputs_[0]->InputReceived(this, std::move(batch));
+                            return Status::OK();
+                        }));
                         lock.lock();
                         if (!backpressure_future_.is_finished()) {
                           EVENT(span_, "Source paused due to backpressure");
@@ -151,10 +140,11 @@ struct SourceNode : ExecNode {
                         return Break(total_batches);
                       },
                       options);
-                }).Then([&](int total_batches) {
-      outputs_[0]->InputFinished(this, total_batches);
-      return task_group_.End();
-    });
+                }).AddCallback([&](Result<int> total_batches) {
+                    if(total_batches.ok())
+                        outputs_[0]->InputFinished(this, *total_batches);
+                    finished_.MarkFinished();
+                });
     END_SPAN_ON_FUTURE_COMPLETION(span_, finished_, this);
     return Status::OK();
   }
@@ -206,7 +196,6 @@ struct SourceNode : ExecNode {
   Future<> backpressure_future_ = Future<>::MakeFinished();
   bool stop_requested_{false};
   int batch_count_{0};
-  util::AsyncTaskGroup task_group_;
   AsyncGenerator<util::optional<ExecBatch>> generator_;
 };
 

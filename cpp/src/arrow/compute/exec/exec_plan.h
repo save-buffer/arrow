@@ -61,6 +61,16 @@ class ARROW_EXPORT ExecPlan : public std::enable_shared_from_this<ExecPlan> {
     return out;
   }
 
+  size_t GetThreadIndex();
+  size_t thread_capacity() const;
+
+  Status AddFuture(Future<> fut);
+  Status ScheduleTask(std::function<Status()> fn);
+  Status ScheduleTask(std::function<Status(size_t)> fn);
+  // The need to register a task group before use will be removed after we rewrite the scheduler.
+  int RegisterTaskGroup(std::function<Status(size_t, int64_t)> task, std::function<Status(size_t)> on_finished);
+  Status StartTaskGroup(int task_group_id, int64_t num_tasks);
+
   /// The initial inputs
   const NodeVector& sources() const;
 
@@ -253,7 +263,7 @@ class ARROW_EXPORT ExecNode {
   virtual void StopProducing() = 0;
 
   /// \brief A future which will be marked finished when this node has stopped producing.
-  virtual Future<> finished() = 0;
+  virtual Future<> finished() { return finished_; };
 
   std::string ToString(int indent = 0) const;
 
@@ -279,7 +289,7 @@ class ARROW_EXPORT ExecNode {
   NodeVector outputs_;
 
   // Future to sync finished
-  Future<> finished_ = Future<>::MakeFinished();
+  Future<> finished_ = Future<>::Make();
 
   util::tracing::Span span_;
 };

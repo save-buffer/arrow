@@ -53,7 +53,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
     }
   }
 
-  Status InputFinished(size_t thread_index, int side) override {
+  Status InputFinished(int side) override {
     if (cancelled_) {
       return Status::Cancelled("Hash join cancelled");
     }
@@ -66,7 +66,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
         left_side_finished_ = true;
       }
       if (proceed) {
-        RETURN_NOT_OK(OnLeftSideAndQueueFinished(thread_index));
+        RETURN_NOT_OK(OnLeftSideAndQueueFinished());
       }
     } else {
       bool proceed;
@@ -76,18 +76,19 @@ class HashJoinBasicImpl : public HashJoinImpl {
         right_side_finished_ = true;
       }
       if (proceed) {
-        RETURN_NOT_OK(OnRightSideFinished(thread_index));
+        RETURN_NOT_OK(OnRightSideFinished());
       }
     }
     return Status::OK();
   }
 
-  Status Init(ExecContext* ctx, JoinType join_type, bool use_sync_execution,
+  Status Init(ExecContext* ctx, JoinType join_type,
               size_t num_threads, HashJoinSchema* schema_mgr,
               std::vector<JoinKeyCmp> key_cmp, Expression filter,
               OutputBatchCallback output_batch_callback,
               FinishedCallback finished_callback,
-              TaskScheduler::ScheduleImpl schedule_task_callback) override {
+              RegisterTaskGroupCallback register_task_group_callback,
+              StartTaskGroupCallback start_task_group_callback) override {
     num_threads = std::max(num_threads, static_cast<size_t>(1));
 
     START_COMPUTE_SPAN(span_, "HashJoinBasicImpl",
@@ -103,6 +104,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
     filter_ = std::move(filter);
     output_batch_callback_ = std::move(output_batch_callback);
     finished_callback_ = std::move(finished_callback);
+    register_task_group_callback_ = std::move(register_task_group_callback);
+    start_task_group_callback_ = std::move(start_task_group_callback);
+
     // TODO(ARROW-15732)
     // Each side of join might have an IO thread being called from.
     local_states_.resize(GetCpuThreadPoolCapacity() + io::GetIOThreadPoolCapacity() + 1);
@@ -119,23 +123,17 @@ class HashJoinBasicImpl : public HashJoinImpl {
     left_side_finished_ = false;
     left_queue_finished_ = false;
 
-    scheduler_ = TaskScheduler::Make();
     RegisterBuildHashTable();
     RegisterProbeQueuedBatches();
     RegisterScanHashTable();
-    scheduler_->RegisterEnd();
-    RETURN_NOT_OK(scheduler_->StartScheduling(
-        0 /*thread index*/, std::move(schedule_task_callback),
-        static_cast<int>(2 * num_threads) /*concurrent tasks*/, use_sync_execution));
-
     return Status::OK();
   }
 
-  void Abort(TaskScheduler::AbortContinuationImpl pos_abort_callback) override {
+  void Abort(AbortContinuationImpl pos_abort_callback) override {
     EVENT(span_, "Abort");
     END_SPAN(span_);
     cancelled_ = true;
-    scheduler_->Abort(std::move(pos_abort_callback));
+    pos_abort_callback();
   }
 
  private:
@@ -663,13 +661,13 @@ class HashJoinBasicImpl : public HashJoinImpl {
 
     right_batches_.clear();
 
-    RETURN_NOT_OK(ProbeQueuedBatches(thread_index));
+    RETURN_NOT_OK(ProbeQueuedBatches());
 
     return Status::OK();
   }
 
   void RegisterBuildHashTable() {
-    task_group_build_ = scheduler_->RegisterTaskGroup(
+    task_group_build_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return BuildHashTable_exec_task(thread_index, task_id);
         },
@@ -678,8 +676,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status BuildHashTable(size_t thread_index) {
-    return scheduler_->StartTaskGroup(thread_index, task_group_build_,
+  Status BuildHashTable() {
+    return start_task_group_callback_(task_group_build_,
                                       BuildHashTable_num_tasks());
   }
 
@@ -708,14 +706,14 @@ class HashJoinBasicImpl : public HashJoinImpl {
       left_queue_finished_ = true;
     }
     if (proceed) {
-      RETURN_NOT_OK(OnLeftSideAndQueueFinished(thread_index));
+      RETURN_NOT_OK(OnLeftSideAndQueueFinished());
     }
 
     return Status::OK();
   }
 
   void RegisterProbeQueuedBatches() {
-    task_group_queued_ = scheduler_->RegisterTaskGroup(
+    task_group_queued_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return ProbeQueuedBatches_exec_task(thread_index, task_id);
         },
@@ -724,8 +722,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status ProbeQueuedBatches(size_t thread_index) {
-    return scheduler_->StartTaskGroup(thread_index, task_group_queued_,
+  Status ProbeQueuedBatches() {
+    return start_task_group_callback_(task_group_queued_,
                                       ProbeQueuedBatches_num_tasks());
   }
 
@@ -794,7 +792,7 @@ class HashJoinBasicImpl : public HashJoinImpl {
   }
 
   void RegisterScanHashTable() {
-    task_group_scan_ = scheduler_->RegisterTaskGroup(
+    task_group_scan_ = register_task_group_callback_(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return ScanHashTable_exec_task(thread_index, task_id);
         },
@@ -803,9 +801,9 @@ class HashJoinBasicImpl : public HashJoinImpl {
         });
   }
 
-  Status ScanHashTable(size_t thread_index) {
+  Status ScanHashTable() {
     MergeHasMatch();
-    return scheduler_->StartTaskGroup(thread_index, task_group_scan_,
+    return start_task_group_callback_(task_group_scan_,
                                       ScanHashTable_num_tasks());
   }
 
@@ -824,10 +822,10 @@ class HashJoinBasicImpl : public HashJoinImpl {
     }
   }
 
-  Status OnRightSideFinished(size_t thread_index) { return BuildHashTable(thread_index); }
+  Status OnRightSideFinished() { return BuildHashTable(); }
 
-  Status OnLeftSideAndQueueFinished(size_t thread_index) {
-    return ScanHashTable(thread_index);
+  Status OnLeftSideAndQueueFinished() {
+    return ScanHashTable();
   }
 
   void InitHasMatchIfNeeded(ThreadLocalState* local_state) {
@@ -883,6 +881,8 @@ class HashJoinBasicImpl : public HashJoinImpl {
   //
   OutputBatchCallback output_batch_callback_;
   FinishedCallback finished_callback_;
+  RegisterTaskGroupCallback register_task_group_callback_;
+  StartTaskGroupCallback start_task_group_callback_;
 
   // Thread local runtime state
   //
