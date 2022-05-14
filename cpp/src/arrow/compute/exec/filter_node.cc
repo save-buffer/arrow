@@ -101,12 +101,12 @@ class FilterNode : public ExecNode {
   Status InputReceived(ExecNode* input, ExecBatch batch) override {
     EVENT(span_, "InputReceived", {{"batch.length", batch.length}});
     DCHECK_EQ(input, inputs_[0]);
+    util::tracing::Span span;
     START_COMPUTE_SPAN_WITH_PARENT(span, span_, "InputReceived",
                                    {{"filter", ToStringExtra()},
                                     {"node.label", label()},
                                     {"batch.length", batch.length}});
 
-    util::tracing::Span span;
     ARROW_ASSIGN_OR_RAISE(ExecBatch result, DoFilter(std::move(batch)));
     END_SPAN(span);
     return outputs_[0]->InputReceived(this, std::move(result));
