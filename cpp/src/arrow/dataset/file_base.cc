@@ -436,7 +436,7 @@ class TeeNode : public compute::ExecNode {
           std::shared_ptr<Schema> output_schema,
           std::unique_ptr<internal::DatasetWriter> dataset_writer,
           FileSystemDatasetWriteOptions write_options)
-      : ExecNode(plan, std::move(inputs), std::move(output_schema), /*num_outputs=*/1),
+      : ExecNode(plan, std::move(inputs), { "target" }, std::move(output_schema), /*num_outputs=*/1),
         dataset_writer_(std::move(dataset_writer)),
         write_options_(std::move(write_options)) {}
 
@@ -498,7 +498,7 @@ class TeeNode : public compute::ExecNode {
     return outputs_[0]->InputReceived(this, std::move(result));
   }
 
-  Status InputFinished(compute::ExecNode* input, int total_batches) {
+  Status InputFinished(compute::ExecNode* input, int total_batches) override {
     DCHECK_EQ(input, inputs_[0]);
     return outputs_[0]->InputFinished(input, total_batches);
   }
