@@ -787,6 +787,15 @@ if(CMAKE_C_COMPILER_LAUNCHER AND CMAKE_CXX_COMPILER_LAUNCHER)
        -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  list(APPEND
+    EP_COMMON_CMAKE_ARGS
+    -DEMSCRIPTEN_SYSTEM_PROCESSOR=${EMSCRIPTEN_SYSTEM_PROCESSOR}
+    -DEMSCRIPTEN_ROOT_PATH=${EMSCRIPTEN_ROOT_PATH}
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+  )
+endif()
+
 if(NOT ARROW_VERBOSE_THIRDPARTY_BUILD)
   set(EP_LOG_OPTIONS
       LOG_CONFIGURE
@@ -1812,6 +1821,12 @@ macro(build_jemalloc)
     # 4k and 64k page arm64 systems.
     list(APPEND JEMALLOC_CONFIGURE_COMMAND "--with-lg-page=${ARROW_JEMALLOC_LG_PAGE}")
   endif()
+  if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+    list(APPEND
+      JEMALLOC_CONFIGURE_COMMAND
+      "--host=${CMAKE_SYSTEM_PROCESSOR}"
+      "--with-lg-quantum=4")
+  endif()
   list(APPEND
        JEMALLOC_CONFIGURE_COMMAND
        "--prefix=${JEMALLOC_PREFIX}"
@@ -1825,6 +1840,7 @@ macro(build_jemalloc)
        "--disable-libdl"
        # See https://github.com/jemalloc/jemalloc/issues/1237
        "--disable-initial-exec-tls"
+       "--host=${CMAKE_SYSTEM_PROCESSOR}"
        ${EP_LOG_OPTIONS})
   if(${UPPERCASE_BUILD_TYPE} STREQUAL "DEBUG")
     # Enable jemalloc debug checks when Arrow itself has debugging enabled
@@ -2567,11 +2583,12 @@ macro(build_utf8proc)
   endif()
 
   set(UTF8PROC_CMAKE_ARGS
-      ${EP_COMMON_TOOLCHAIN}
+      ${EP_COMMON_CMAKE_ARGS}
       "-DCMAKE_INSTALL_PREFIX=${UTF8PROC_PREFIX}"
       -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
       -DCMAKE_INSTALL_LIBDIR=lib
       -DBUILD_SHARED_LIBS=OFF)
+
 
   externalproject_add(utf8proc_ep
                       ${EP_LOG_OPTIONS}

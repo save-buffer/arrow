@@ -292,6 +292,22 @@ void OsRetrieveCpuInfo(int64_t* hardware_flags, CpuInfo::Vendor* vendor,
   // TODO: vendor, model_name
 }
 
+#elif defined(__EMSCRIPTEN__)
+    void OsRetrieveCacheSize(std::array<int64_t, kCacheLevels> *cache_sizes)
+    {
+        (*cache_sizes)[0] = 32 * 1024;
+        (*cache_sizes)[1] = 1024 * 1024;
+        (*cache_sizes)[2] = 2 * 1024 * 1024;
+    }
+
+    void OsRetrieveCpuInfo(int64_t *hardware_flags, CpuInfo::Vendor *vendor,
+                           std::string *model_name)
+    {
+        *vendor = CpuInfo::Vendor::Unknown;
+        *hardware_flags = 0;
+        *model_name = "Emscripten VCpu";
+    }
+
 #else
 //------------------------------ LINUX ------------------------------//
 // Get cache size, return 0 on error
@@ -413,7 +429,7 @@ void OsRetrieveCpuInfo(int64_t* hardware_flags, CpuInfo::Vendor* vendor,
     }
   }
 }
-#endif  // WINDOWS, MACOS, LINUX
+#endif  // WINDOWS, MACOS, Emscripten, LINUX
 
 //============================== Arch Dependent ==============================//
 

@@ -243,8 +243,10 @@ if(ARROW_JEMALLOC)
   list(APPEND ARROW_SRCS memory_pool_jemalloc.cc)
 endif()
 
-append_avx2_src(util/bpacking_avx2.cc)
-append_avx512_src(util/bpacking_avx512.cc)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  append_avx2_src(util/bpacking_avx2.cc)
+  append_avx512_src(util/bpacking_avx512.cc)
+endif()
 
 if(ARROW_HAVE_NEON)
   list(APPEND ARROW_SRCS util/bpacking_neon.cc)
