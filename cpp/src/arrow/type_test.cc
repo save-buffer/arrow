@@ -414,8 +414,7 @@ TEST(TestFieldRef, FromDotPath) {
 
   ASSERT_OK_AND_EQ(FieldRef(R"([y]\tho.\)"), FieldRef::FromDotPath(R"(.\[y\]\\tho\.\)"));
 
-  ASSERT_OK_AND_EQ(FieldRef(), FieldRef::FromDotPath(R"()"));
-
+  ASSERT_RAISES(Invalid, FieldRef::FromDotPath(R"()"));
   ASSERT_RAISES(Invalid, FieldRef::FromDotPath(R"(alpha)"));
   ASSERT_RAISES(Invalid, FieldRef::FromDotPath(R"([134234)"));
   ASSERT_RAISES(Invalid, FieldRef::FromDotPath(R"([1stuf])"));
@@ -427,7 +426,6 @@ TEST(TestFieldRef, DotPathRoundTrip) {
     ASSERT_OK_AND_EQ(ref, FieldRef::FromDotPath(dot_path));
   };
 
-  check_roundtrip(FieldRef());
   check_roundtrip(FieldRef("foo"));
   check_roundtrip(FieldRef("foo", 1, "bar", 2, 3));
   check_roundtrip(FieldRef(1, 2, 3));
